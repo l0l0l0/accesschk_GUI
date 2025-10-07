@@ -6,7 +6,7 @@ AccessChk GUI — v1.4
 • Barre de progression + compteur de lignes
 
 Build EXE (optionnel) :
-pyinstaller --onefile --name AccessChkGUI accesschk_gui_tk.py
+pyinstaller --onefile --noconsole --name AccessChkGUI accesschk_gui_tk.py
 # (ne pas utiliser --add-binary ; place accesschk.exe manuellement à côté du .exe)
 
 Conseils Principal :

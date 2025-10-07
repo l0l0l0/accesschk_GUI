@@ -17,6 +17,7 @@ $pip = Join-Path $venv "Scripts\pip.exe"
 $spec = @(
   "--onefile",
   "--noconfirm",
+  "--noconsole",
   "--name","AccessChkGUI",
   "accesschk_gui_tk.py"
 )
