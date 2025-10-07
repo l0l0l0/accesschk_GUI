@@ -150,7 +150,20 @@ class AccessChkGUI(tk.Tk):
                     if not who: continue
                     # RW + récursif + sans bandeau
                     args = [accesschk, "-accepteula", "-nobanner", who, "-w", "-s", target]
-                    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    startupinfo = None
+                    creationflags = 0
+                    if os.name == "nt":
+                        startupinfo = subprocess.STARTUPINFO()
+                        startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+                        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+                    proc = subprocess.Popen(
+                        args,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        startupinfo=startupinfo,
+                        creationflags=creationflags,
+                    )
                     self.proc = proc
 
                     invalid = False
