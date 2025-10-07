@@ -51,6 +51,8 @@ class AccessChkGUI(tk.Tk):
         self.geometry("1100x800"); self.minsize(880, 620)
         self.logs=[]; self.q=queue.Queue(); self.proc=None; self.running=False
         self.BATCH_MAX=250; self._line_count=0; self._isdir_cache={}
+        self.current_target = None
+        self.current_principal = None
         self._build_ui()
         self.after(100, self._poll_queue)
 
@@ -131,15 +133,30 @@ class AccessChkGUI(tk.Tk):
 
         self.logs.clear(); self._line_count=0; self._isdir_cache.clear()
         self.txt.configure(state=tk.NORMAL); self.txt.delete("1.0", tk.END); self.txt.configure(state=tk.DISABLED)
-        self.status_var.set("Lancement... 0 lignes"); self.running=True
+        principal_label = principal or "(auto)"
+        self.status_var.set(f"Préparation du scan : {principal_label} sur {len(targets)} cible(s). 0 lignes")
+        self.running=True
+        self.current_target = None
+        self.current_principal = None
         self.btn_scan.configure(state=tk.DISABLED); self.btn_stop.configure(state=tk.NORMAL); self.pbar.start(60)
 
         threading.Thread(target=self._run_accesschk_thread, args=(accesschk, targets, principal), daemon=True).start()
 
     def _on_stop(self):
         try:
-            if self.proc and self.proc.poll() is None: self.proc.kill()
-        except Exception: pass
+            if self.proc and self.proc.poll() is None:
+                self.proc.kill()
+                self.status_var.set(f"Arrêt manuel. {self._line_count} lignes.")
+        except Exception:
+            pass
+        finally:
+            self.running = False
+            self.pbar.stop()
+            self.btn_scan.configure(state=tk.NORMAL)
+            self.btn_stop.configure(state=tk.DISABLED)
+            self.proc = None
+            self.current_target = None
+            self.current_principal = None
 
     def _run_accesschk_thread(self, accesschk, targets, principal):
         try:
@@ -157,14 +174,26 @@ class AccessChkGUI(tk.Tk):
                         startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
                         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-                    proc = subprocess.Popen(
-                        args,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        startupinfo=startupinfo,
-                        creationflags=creationflags,
-                    )
+                    self.q.put({"_status": f"Scan de {target} — {who or '(auto)'}"})
+                    try:
+                        proc = subprocess.Popen(
+                            args,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            startupinfo=startupinfo,
+                            creationflags=creationflags,
+                        )
+                    except FileNotFoundError:
+                        self.q.put({"line": "[ERREUR] accesschk.exe introuvable au lancement.", "write": False, "err": True})
+                        self.q.put({"_finished": True, "returncode": -1})
+                        return
+                    except Exception as ex:
+                        self.q.put({"line": f"[ERREUR] Impossible de lancer accesschk.exe : {ex}", "write": False, "err": True})
+                        self.q.put({"_finished": True, "returncode": -1})
+                        return
                     self.proc = proc
+                    self.current_target = target
+                    self.current_principal = who
 
                     invalid = False
                     def reader(stream, is_err=False):
@@ -194,9 +223,14 @@ class AccessChkGUI(tk.Tk):
         while processed < self.BATCH_MAX:
             try: item = self.q.get_nowait()
             except queue.Empty: break
+            if "_status" in item:
+                self.status_var.set(item["_status"])
+                continue
             if item.get("_finished"):
                 rc=item.get("returncode"); self.status_var.set(f"Terminé (rc={rc}). {len(self.logs)} lignes.")
                 self.proc=None; self.running=False; self.pbar.stop()
+                self.current_target = None
+                self.current_principal = None
                 self.btn_scan.configure(state=tk.NORMAL); self.btn_stop.configure(state=tk.DISABLED); continue
             self.logs.append(item); self._line_count += 1
             text=item["line"]
@@ -212,7 +246,10 @@ class AccessChkGUI(tk.Tk):
             if buf_err:    self.txt.insert(tk.END, "\n".join(buf_err) + "\n", "err")
             self.txt.see(tk.END); self.txt.configure(state=tk.DISABLED)
 
-        if self.running: self.status_var.set(f"Scan en cours... {self._line_count} lignes")
+        if self.running:
+            target = self.current_target or "(en attente)"
+            principal = self.current_principal or "(auto)"
+            self.status_var.set(f"Scan en cours — {principal} @ {target} : {self._line_count} lignes")
         self.after(100, self._poll_queue)
 
     # ---- filtering / export ----
@@ -225,43 +262,46 @@ class AccessChkGUI(tk.Tk):
         return isd
 
     def _render_logs(self):
-        f = self.var_filter.get().strip().lower()
-        only_dirs = self.var_only_folders.get()
         self.txt.configure(state=tk.NORMAL); self.txt.delete("1.0", tk.END)
-        norm=writ=err=[]
         norm, writ, err = [], [], []
-        for it in self.logs:
-            text = it["line"]; is_err = it["err"]
-            if f and f not in text.lower(): continue
-            if only_dirs:
-                # exiger 'RW ' au début de la ligne ET que le chemin soit un répertoire réel
-                if not LINE_RW_PREFIX.search(text): continue
-                p = extract_first_path(text)
-                if not p or not self._is_dir_cached(p): continue
-            # coloration: rouge si ligne write
-            if WRITE_REGEX.search(text) and not is_err: writ.append(text)
-            elif is_err: err.append(text)
-            else: norm.append(text)
+        for it in self._filtered_logs():
+            text = it["line"]
+            if it["err"]:
+                err.append(text)
+            elif it["write"]:
+                writ.append(text)
+            else:
+                norm.append(text)
         if norm: self.txt.insert(tk.END, "\n".join(norm) + "\n", "normal")
         if writ: self.txt.insert(tk.END, "\n".join(writ) + "\n", "write")
         if err:  self.txt.insert(tk.END, "\n".join(err) + "\n", "err")
         self.txt.see(tk.END); self.txt.configure(state=tk.DISABLED)
 
+    def _filtered_logs(self, filter_text=None, only_dirs=None):
+        f = (self.var_filter.get() if filter_text is None else filter_text).strip().lower()
+        only_dirs = self.var_only_folders.get() if only_dirs is None else only_dirs
+        for it in self.logs:
+            text = it["line"]
+            if f and f not in text.lower():
+                continue
+            if only_dirs:
+                if it["err"]:
+                    continue
+                if not LINE_RW_PREFIX.search(text):
+                    continue
+                p = extract_first_path(text)
+                if not p or not self._is_dir_cached(p):
+                    continue
+            yield it
+
     def _export_filtered(self):
         if not self.logs: messagebox.showinfo("Export", "Aucun log à exporter."); return
         path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files","*.txt"), ("All files","*.*")], initialfile=EXPORT_DEFAULT)
         if not path: return
-        f = self.var_filter.get().strip().lower(); only_dirs = self.var_only_folders.get()
         try:
             with open(path, "w", encoding="utf-8") as fh:
-                for it in self.logs:
-                    text = it["line"]
-                    if f and f not in text.lower(): continue
-                    if only_dirs:
-                        if not LINE_RW_PREFIX.search(text): continue
-                        p = extract_first_path(text)
-                        if not p or not self._is_dir_cached(p): continue
-                    fh.write(text + "\n")
+                for it in self._filtered_logs():
+                    fh.write(it["line"] + "\n")
             messagebox.showinfo("Export", f"Export terminé : {path}")
         except Exception as ex:
             messagebox.showerror("Erreur export", str(ex))
