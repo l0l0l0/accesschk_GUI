@@ -635,6 +635,10 @@ class AccessChkGUI(tk.Tk):
         self.history_manager = ScanHistoryManager(base_dir)
         self.export_manager = ExportManager()
         
+        # Exclusions par défaut
+        default_appdata = os.path.expandvars("%USERPROFILE%\\AppData")
+        self.exclusions = [default_appdata] if os.path.exists(default_appdata) else []
+        
         # État de l'application
         self.logs = []
         self.running = False
@@ -674,6 +678,8 @@ class AccessChkGUI(tk.Tk):
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="Nouveau scan initial", command=lambda: self._on_scan("baseline"), accelerator="Ctrl+N")
         filemenu.add_command(label="Scan de comparaison", command=lambda: self._on_scan("compare"), accelerator="Ctrl+R")
+        filemenu.add_separator()
+        filemenu.add_command(label="Exclusions", command=self._open_exclusions, accelerator="Ctrl+X")
         filemenu.add_separator()
         
         # Sous-menu Export
@@ -719,40 +725,101 @@ class AccessChkGUI(tk.Tk):
                   foreground="firebrick").pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
 
         frm_top = ttk.Frame(self); frm_top.pack(side=tk.TOP, fill=tk.X, padx=8, pady=6)
-        ttk.Label(frm_top, text="accesschk.exe :").grid(row=0, column=0, sticky=tk.W, padx=4)
-        self.entry_accesschk = ttk.Entry(frm_top, width=70); self.entry_accesschk.grid(row=0, column=1, sticky=tk.W)
+
+        # === GROUPE CONFIGURATION ===
+        config_group = ttk.LabelFrame(frm_top, text="Configuration", padding=10)
+        config_group.pack(fill=tk.X, pady=(0,8))
+        
+        # AccessChk.exe
+        ttk.Label(config_group, text="accesschk.exe :").grid(row=0, column=0, sticky=tk.W, padx=(0,6))
+        self.entry_accesschk = ttk.Entry(config_group, width=60)
+        self.entry_accesschk.grid(row=0, column=1, sticky=tk.W+tk.E, padx=(0,6))
         self.entry_accesschk.insert(0, bundled_accesschk_path())
-        ttk.Button(frm_top, text="Parcourir", command=self._browse_accesschk).grid(row=0, column=2, padx=6)
-
-        ttk.Label(frm_top, text="Utilisateur courant :").grid(row=1, column=0, sticky=tk.W, padx=4, pady=(6,0))
+        ttk.Button(config_group, text="Parcourir", command=self._browse_accesschk).grid(row=0, column=2)
+        
+        # Utilisateur
+        ttk.Label(config_group, text="Utilisateur courant :").grid(row=1, column=0, sticky=tk.W, padx=(0,6), pady=(6,0))
         self.var_principal = tk.StringVar(value=self.default_principal or "(introuvable)")
-        ttk.Label(frm_top, textvariable=self.var_principal).grid(row=1, column=1, sticky=tk.W, pady=(6,0))
-        btns = ttk.Frame(frm_top); btns.grid(row=1, column=2, padx=6, pady=(6,0))
-        self.btn_scan_base = ttk.Button(btns, text="Scan initial", command=lambda: self._on_scan("baseline"))
-        self.btn_scan_base.pack(side=tk.LEFT)
-        self.btn_scan_compare = ttk.Button(btns, text="Scan comparaison", command=lambda: self._on_scan("compare"))
-        self.btn_scan_compare.pack(side=tk.LEFT, padx=(6,0))
-        self.btn_stop = ttk.Button(btns, text="Stop", command=self._on_stop, state=tk.DISABLED)
-        self.btn_stop.pack(side=tk.LEFT, padx=(6,0))
+        ttk.Label(config_group, textvariable=self.var_principal, foreground="blue").grid(row=1, column=1, sticky=tk.W, pady=(6,0))
+        
+        # Configurer la grille pour redimensionnement
+        config_group.columnconfigure(1, weight=1)
 
-        ttk.Label(frm_top, text="Cibles (séparer par ;) :").grid(row=2, column=0, sticky=tk.W, padx=4, pady=(6,0))
-        self.entry_target = ttk.Entry(frm_top, width=70); self.entry_target.grid(row=2, column=1, sticky=tk.W, pady=(6,0))
+        # === GROUPE CIBLES ET EXCLUSIONS ===
+        targets_group = ttk.LabelFrame(frm_top, text="Cibles et Exclusions", padding=10)
+        targets_group.pack(fill=tk.X, pady=(0,8))
+        
+        # Cibles
+        ttk.Label(targets_group, text="Cibles (séparer par ;) :").grid(row=0, column=0, sticky=tk.W, padx=(0,6))
+        self.entry_target = ttk.Entry(targets_group, width=60)
+        self.entry_target.grid(row=0, column=1, sticky=tk.W+tk.E, padx=(0,6))
         self.entry_target.insert(0, default_targets_string())
-        ttk.Button(frm_top, text="Parcourir", command=self._browse_target_replace).grid(row=2, column=2, padx=6, pady=(6,0))
+        
+        # Boutons cibles
+        targets_btns = ttk.Frame(targets_group)
+        targets_btns.grid(row=0, column=2)
+        ttk.Button(targets_btns, text="Parcourir", command=self._browse_target_replace).pack(side=tk.LEFT, padx=(0,6))
+        self.btn_exclusions = ttk.Button(targets_btns, text="Exclusions", command=self._open_exclusions)
+        self.btn_exclusions.pack(side=tk.LEFT)
+        
+        # Configurer la grille pour redimensionnement
+        targets_group.columnconfigure(1, weight=1)
 
-        frm_filter = ttk.Frame(self); frm_filter.pack(side=tk.TOP, fill=tk.X, padx=8, pady=6)
-        ttk.Label(frm_filter, text="Filtre (substring, case-insensitive) :").pack(side=tk.LEFT)
+        # === GROUPE ACTIONS ===
+        actions_group = ttk.LabelFrame(frm_top, text="Actions", padding=10)
+        actions_group.pack(fill=tk.X, pady=(0,8))
+        
+        # Boutons de scan
+        scan_frame = ttk.Frame(actions_group)
+        scan_frame.pack(anchor=tk.W)
+        
+        self.btn_scan_base = ttk.Button(scan_frame, text="🔍 Scan initial", command=lambda: self._on_scan("baseline"))
+        self.btn_scan_base.pack(side=tk.LEFT, padx=(0,8))
+        
+        self.btn_scan_compare = ttk.Button(scan_frame, text="🔄 Scan comparaison", command=lambda: self._on_scan("compare"))
+        self.btn_scan_compare.pack(side=tk.LEFT, padx=(0,8))
+        
+        self.btn_stop = ttk.Button(scan_frame, text="⏹️ Stop", command=self._on_stop, state=tk.DISABLED)
+        self.btn_stop.pack(side=tk.LEFT)
+
+        # === GROUPE FILTRES ===
+        frm_filter = ttk.LabelFrame(self, text="Filtres et Export", padding=10)
+        frm_filter.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0,6))
+        
+        # Ligne des filtres
+        filter_row = ttk.Frame(frm_filter)
+        filter_row.pack(fill=tk.X, pady=(0,5))
+        
+        ttk.Label(filter_row, text="Filtre :").pack(side=tk.LEFT)
         self.var_filter = tk.StringVar()
-        self.entry_filter = ttk.Entry(frm_filter, textvariable=self.var_filter, width=40)
-        self.entry_filter.pack(side=tk.LEFT, padx=6)
+        self.entry_filter = ttk.Entry(filter_row, textvariable=self.var_filter, width=40)
+        self.entry_filter.pack(side=tk.LEFT, padx=(6,12))
         self.entry_filter.bind("<KeyRelease>", lambda e: self._render_logs())
+        
         self.var_only_folders = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frm_filter, text="Only folders", variable=self.var_only_folders, command=self._render_logs).pack(side=tk.LEFT, padx=12)
-        ttk.Button(frm_filter, text="Export (filtered)", command=self._export_filtered).pack(side=tk.RIGHT)
+        ttk.Checkbutton(filter_row, text="Dossiers seulement", variable=self.var_only_folders, command=self._render_logs).pack(side=tk.LEFT, padx=(0,12))
+        
+        ttk.Button(filter_row, text="📤 Export (filtered)", command=self._export_filtered).pack(side=tk.RIGHT)
 
-        frm_prog = ttk.Frame(self); frm_prog.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0,6))
-        self.pbar = ttk.Progressbar(frm_prog, mode="indeterminate"); self.pbar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,8))
-        self.status_var = tk.StringVar(value="Prêt"); ttk.Label(frm_prog, textvariable=self.status_var).pack(side=tk.RIGHT)
+        # === GROUPE INFORMATIONS ===
+        info_group = ttk.LabelFrame(self, text="Informations", padding=10)
+        info_group.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0,6))
+        
+        # Zone d'affichage de la commande
+        cmd_frame = ttk.Frame(info_group)
+        cmd_frame.pack(fill=tk.X, pady=(0,5))
+        ttk.Label(cmd_frame, text="Commande :").pack(side=tk.LEFT)
+        self.cmd_var = tk.StringVar(value="Aucune commande lancée")
+        cmd_label = ttk.Label(cmd_frame, textvariable=self.cmd_var, foreground="blue", font=("TkDefaultFont", 9))
+        cmd_label.pack(side=tk.LEFT, padx=(6,0), fill=tk.X, expand=True)
+        
+        # Barre de progression et statut
+        progress_frame = ttk.Frame(info_group)
+        progress_frame.pack(fill=tk.X)
+        self.pbar = ttk.Progressbar(progress_frame, mode="indeterminate")
+        self.pbar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,8))
+        self.status_var = tk.StringVar(value="Prêt")
+        ttk.Label(progress_frame, textvariable=self.status_var).pack(side=tk.RIGHT)
 
         frm_logs = ttk.Frame(self); frm_logs.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0,8))
         self.txt = tk.Text(frm_logs, wrap=tk.NONE, state=tk.NORMAL); self.txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -778,6 +845,7 @@ class AccessChkGUI(tk.Tk):
         self.bind_all("<Control-l>", lambda e: self._clear_logs())
         self.bind_all("<Control-d>", lambda e: self._toggle_folders_only())
         self.bind_all("<Control-f>", lambda e: self._focus_filter())
+        self.bind_all("<Control-x>", lambda e: self._open_exclusions())
         self.bind_all("<F1>", lambda e: self._show_shortcuts_help())
         self.bind_all("<Escape>", lambda e: self._on_stop())
 
@@ -822,6 +890,7 @@ class AccessChkGUI(tk.Tk):
 FICHIER :
 • Ctrl+N : Nouveau scan initial
 • Ctrl+R : Scan de comparaison  
+• Ctrl+X : Gestion des exclusions
 • Ctrl+E : Exporter les résultats
 • Ctrl+Q : Quitter l'application
 
@@ -877,6 +946,120 @@ Développé avec Python et Tkinter
         p = filedialog.askdirectory(title="Choisir un dossier (remplace la liste actuelle)", mustexist=True)
         if p: self.entry_target.delete(0, tk.END); self.entry_target.insert(0, os.path.normpath(p))
 
+    def _open_exclusions(self):
+        """Ouvre la fenêtre de gestion des exclusions."""
+        
+        # Créer la fenêtre popup
+        exclusion_window = tk.Toplevel(self)
+        exclusion_window.title("Gestion des exclusions")
+        exclusion_window.geometry("600x400")
+        exclusion_window.transient(self)
+        exclusion_window.grab_set()
+        
+        # Centrer la fenêtre
+        exclusion_window.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() // 2) - (exclusion_window.winfo_width() // 2)
+        y = self.winfo_y() + (self.winfo_height() // 2) - (exclusion_window.winfo_height() // 2)
+        exclusion_window.geometry(f"+{x}+{y}")
+        
+        # Frame principal
+        main_frame = ttk.Frame(exclusion_window)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Titre et description
+        ttk.Label(main_frame, text="Chemins à exclure des scans", font=("TkDefaultFont", 12, "bold")).pack(pady=(0,5))
+        ttk.Label(main_frame, text="Ces chemins ne seront pas analysés lors des scans AccessChk.", 
+                 foreground="gray").pack(pady=(0,10))
+        
+        # Frame pour la liste et scrollbar
+        list_frame = ttk.Frame(main_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0,10))
+        
+        # Listbox avec scrollbar
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, selectmode=tk.SINGLE)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        # Remplir la listbox avec les exclusions actuelles
+        for exclusion in self.exclusions:
+            listbox.insert(tk.END, exclusion)
+        
+        # Frame pour les boutons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(0,10))
+        
+        def add_exclusion():
+            """Ajouter une nouvelle exclusion."""
+            path = filedialog.askdirectory(title="Sélectionner un dossier à exclure")
+            if path:
+                normalized_path = os.path.normpath(path)
+                if normalized_path not in self.exclusions:
+                    self.exclusions.append(normalized_path)
+                    listbox.insert(tk.END, normalized_path)
+                else:
+                    messagebox.showinfo("Information", "Ce chemin est déjà dans les exclusions.")
+        
+        def remove_exclusion():
+            """Supprimer l'exclusion sélectionnée."""
+            selection = listbox.curselection()
+            if selection:
+                index = selection[0]
+                path = listbox.get(index)
+                self.exclusions.remove(path)
+                listbox.delete(index)
+            else:
+                messagebox.showinfo("Information", "Veuillez sélectionner un élément à supprimer.")
+        
+        def add_manual_exclusion():
+            """Ajouter manuellement un chemin."""
+            dialog = tk.Toplevel(exclusion_window)
+            dialog.title("Ajouter un chemin")
+            dialog.geometry("400x120")
+            dialog.transient(exclusion_window)
+            dialog.grab_set()
+            
+            ttk.Label(dialog, text="Chemin à exclure :").pack(pady=10)
+            entry = ttk.Entry(dialog, width=50)
+            entry.pack(pady=5)
+            entry.focus()
+            
+            def ok_manual():
+                path = entry.get().strip()
+                if path:
+                    normalized_path = os.path.normpath(path)
+                    if normalized_path not in self.exclusions:
+                        self.exclusions.append(normalized_path)
+                        listbox.insert(tk.END, normalized_path)
+                        dialog.destroy()
+                    else:
+                        messagebox.showinfo("Information", "Ce chemin est déjà dans les exclusions.")
+                else:
+                    messagebox.showwarning("Attention", "Veuillez saisir un chemin.")
+            
+            btn_frame_manual = ttk.Frame(dialog)
+            btn_frame_manual.pack(pady=10)
+            ttk.Button(btn_frame_manual, text="OK", command=ok_manual).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame_manual, text="Annuler", command=dialog.destroy).pack(side=tk.LEFT)
+            
+            dialog.bind('<Return>', lambda e: ok_manual())
+            dialog.bind('<Escape>', lambda e: dialog.destroy())
+        
+        # Boutons de gestion
+        ttk.Button(btn_frame, text="📁 Parcourir", command=add_exclusion).pack(side=tk.LEFT, padx=(0,5))
+        ttk.Button(btn_frame, text="✏️ Saisir", command=add_manual_exclusion).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="🗑️ Supprimer", command=remove_exclusion).pack(side=tk.LEFT, padx=5)
+        
+        # Boutons de fermeture
+        close_frame = ttk.Frame(main_frame)
+        close_frame.pack(fill=tk.X)
+        ttk.Button(close_frame, text="Fermer", command=exclusion_window.destroy).pack(side=tk.RIGHT)
+        
+        # Focus sur la fenêtre
+        exclusion_window.focus_set()
+
     # ---- core ----
     def _on_scan(self, mode: str = "baseline"):
         """Démarre un scan AccessChk dans un thread en fonction du ``mode`` sélectionné."""
@@ -903,7 +1086,51 @@ Développé avec Python et Tkinter
             messagebox.showerror("Erreur", f"Erreur avec les cibles: {error_msg}")
             return
         
+        # Filtrage des cibles avec les exclusions
+        original_count = len(targets)
+        filtered_targets = []
+        excluded_targets = []
+        
+        for target in targets:
+            target_normalized = os.path.normpath(target).lower()
+            is_excluded = False
+            
+            for exclusion in self.exclusions:
+                exclusion_normalized = os.path.normpath(exclusion).lower()
+                # Vérifier si la cible est dans un répertoire exclu
+                if target_normalized.startswith(exclusion_normalized):
+                    is_excluded = True
+                    excluded_targets.append(target)
+                    break
+            
+            if not is_excluded:
+                filtered_targets.append(target)
+        
+        # Mise à jour des cibles après filtrage
+        targets = filtered_targets
+        
+        # Informer l'utilisateur des exclusions
+        if excluded_targets:
+            excluded_msg = f"{len(excluded_targets)} cible(s) exclue(s) : " + ", ".join(excluded_targets[:3])
+            if len(excluded_targets) > 3:
+                excluded_msg += f" (et {len(excluded_targets) - 3} autres)"
+            logger.info(excluded_msg)
+        
+        if not targets:
+            messagebox.showwarning("Aucune cible", "Toutes les cibles ont été exclues. Aucun scan à effectuer.")
+            return
+
         principal = self.default_principal.strip() if self.default_principal else ""
+
+        # Affichage de la commande qui sera lancée
+        sample_cmd = [accesschk, "-accepteula", "-nobanner"]
+        if principal:
+            sample_cmd.append(principal)
+        sample_cmd.extend(["-w", "-s", targets[0] if targets else "<cible>"])
+        cmd_display = " ".join(f'"{arg}"' if " " in arg else arg for arg in sample_cmd)
+        if len(targets) > 1:
+            cmd_display += f" (et {len(targets) - 1} autres cibles)"
+        self.cmd_var.set(cmd_display)
 
         # Sauvegarder les informations pour l'historique
         self.current_scan_targets = targets
