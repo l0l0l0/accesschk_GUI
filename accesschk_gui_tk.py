@@ -49,6 +49,8 @@ def extract_first_path(s: str):
     m = PATH_EXTRACT.search(s)
     return m.group(0).strip().rstrip('"') if m else None
 
+ASCII_ALNUM = re.compile(r"[A-Za-z0-9]")
+
 def bundled_accesschk_path() -> str:
     base = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
     return os.path.join(base, "accesschk.exe")
@@ -73,6 +75,7 @@ class AccessChkGUI(tk.Tk):
         self.geometry("1100x800"); self.minsize(880, 620)
         self.logs=[]; self.q=queue.Queue(); self.proc=None; self.running=False
         self.BATCH_MAX=250; self._line_count=0; self._write_count=0; self._isdir_cache={}
+        self._suppressed_errors = 0
         self.current_target = None
         self.current_principal = None
         self.default_principal = current_user_principal()
@@ -177,6 +180,7 @@ class AccessChkGUI(tk.Tk):
         principal = self.default_principal.strip() if self.default_principal else ""
 
         self.logs.clear(); self._line_count=0; self._write_count=0; self._isdir_cache.clear()
+        self._suppressed_errors = 0
         self.txt.configure(state=tk.NORMAL); self.txt.delete("1.0", tk.END); self.txt.configure(state=tk.DISABLED)
         principal_label = principal or "(introuvable)"
         self.status_var.set(f"Préparation du scan : {principal_label} sur {len(targets)} cible(s). 0 lignes (0 RW)")
@@ -278,10 +282,15 @@ class AccessChkGUI(tk.Tk):
                 rc=item.get("returncode")
                 self._finish_scan(rc)
                 continue
+            text=item["line"]
+            if "error getting security" in text.lower():
+                self._suppressed_errors += 1
+                self._suppress_error_sequence(buf_normal, buf_write, buf_err)
+                processed += 1
+                continue
             self.logs.append(item); self._line_count += 1
             if item["write"] and not item["err"]:
                 self._write_count += 1
-            text=item["line"]
             if item["err"]: buf_err.append(text)
             elif item["write"]: buf_write.append(text)
             else: buf_normal.append(text)
@@ -297,8 +306,9 @@ class AccessChkGUI(tk.Tk):
         if self.running:
             target = self.current_target or "(en attente)"
             principal = self.current_principal or "(auto)"
+            suppressed = f", {self._suppressed_errors} erreurs ignorées" if self._suppressed_errors else ""
             self.status_var.set(
-                f"Scan en cours — {principal} @ {target} : {self._line_count} lignes ({self._write_count} RW)"
+                f"Scan en cours — {principal} @ {target} : {self._line_count} lignes ({self._write_count} RW{suppressed})"
             )
         self.after(100, self._poll_queue)
 
@@ -308,14 +318,55 @@ class AccessChkGUI(tk.Tk):
         self.pbar.stop()
         self.current_target = None
         self.current_principal = None
+        suppressed = f", {self._suppressed_errors} erreurs ignorées" if self._suppressed_errors else ""
         self.status_var.set(
-            f"Terminé (rc={returncode}). {len(self.logs)} lignes ({self._write_count} RW)."
+            f"Terminé (rc={returncode}). {len(self.logs)} lignes ({self._write_count} RW{suppressed})."
         )
         self.btn_stop.configure(state=tk.DISABLED)
         try:
             self._persist_scan_results()
         finally:
             self._update_compare_state()
+
+    def _remove_last_log_entry(self, buf_normal, buf_write, buf_err):
+        if not self.logs:
+            return False
+        last = self.logs.pop()
+        self._line_count = max(0, self._line_count - 1)
+        if last["write"] and not last["err"] and self._write_count:
+            self._write_count -= 1
+        target_buf = buf_err if last["err"] else (buf_write if last["write"] else buf_normal)
+        for idx in range(len(target_buf) - 1, -1, -1):
+            if target_buf[idx] == last["line"]:
+                target_buf.pop(idx)
+                break
+        return True
+
+    def _suppress_error_sequence(self, buf_normal, buf_write, buf_err):
+        removed = False
+
+        def remove_last_if(predicate):
+            nonlocal removed
+            if self.logs and predicate(self.logs[-1]):
+                if self._remove_last_log_entry(buf_normal, buf_write, buf_err):
+                    removed = True
+                return True
+            return False
+
+        remove_last_if(
+            lambda it: not it["err"]
+            and not LINE_RW_PREFIX.search(it["line"])
+            and bool(extract_first_path(it["line"]))
+        )
+        # Remove leftover unreadable noise (ex: garbled wide-char sequences)
+        while remove_last_if(
+            lambda it: not it["err"]
+            and not it["write"]
+            and not LINE_RW_PREFIX.search(it["line"])
+            and not ASCII_ALNUM.search(it["line"])
+        ):
+            pass
+        return removed
 
     # ---- filtering / export ----
     def _is_dir_cached(self, path: str) -> bool:
