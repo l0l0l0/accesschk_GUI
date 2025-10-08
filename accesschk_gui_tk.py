@@ -37,10 +37,10 @@ class AppConfig:
     """Configuration centralisée de l'application."""
     
     # Performance
-    BATCH_SIZE = 25  # Encore plus petit pour éviter les blocages
-    BATCH_TIMEOUT_MS = 15  # Timeout ultra-court
-    UI_UPDATE_INTERVAL_MS = 30  # Très fréquent
-    MAX_DISPLAYED_LINES = 2000  # Limite drastiquement réduite
+    BATCH_SIZE = 50  # Équilibre entre fluidité et performance
+    BATCH_TIMEOUT_MS = 25  # Timeout court mais raisonnable
+    UI_UPDATE_INTERVAL_MS = 50  # Fréquent mais pas excessif
+    MAX_DISPLAYED_LINES = 3000  # Limite raisonnable
     
     # UI
     WINDOW_WIDTH = 1100
@@ -713,7 +713,6 @@ class AccessChkGUI(tk.Tk):
         self.logs = []
         self.running = False
         self.scan_mode = None
-        self._current_scan_file = None  # Fichier de scan en cours d'écriture
         
         # Métriques et cache
         self._line_count = 0
@@ -1217,17 +1216,7 @@ Développé avec Python et Tkinter
         self._pending_path = None
         self.scan_mode = mode
         
-        # Créer immédiatement le fichier de scan pour qu'il soit visible
-        target_path = self.base_scan_path if mode == "baseline" else self.compare_scan_path
-        try:
-            # Créer un fichier vide au début
-            with open(target_path, "w", encoding="utf-8") as fh:
-                fh.write(f"# Scan {mode} démarré à {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            self._current_scan_file = target_path
-            logger.info(f"Fichier de scan créé : {target_path}")
-        except Exception as ex:
-            logger.warning(f"Impossible de créer le fichier de scan : {ex}")
-            self._current_scan_file = None
+
         
         # Mise à jour de l'UI
         self.txt.configure(state=tk.NORMAL)
@@ -1380,8 +1369,13 @@ Développé avec Python et Tkinter
                 
                 # Redessine seulement les lignes conservées
                 for item in self.logs:
-                    color = "red" if item["err"] else ("green" if item["write"] else "black")
-                    self.txt.insert(tk.END, item["line"] + "\n", color)
+                    if item["err"]:
+                        tag = "err"
+                    elif item["write"]:
+                        tag = "write"  # Rouge avec gras pour les RW
+                    else:
+                        tag = "normal"
+                    self.txt.insert(tk.END, item["line"] + "\n", tag)
                 
                 self.txt.configure(state=tk.DISABLED)
                 self.txt.see(tk.END)
@@ -1392,14 +1386,7 @@ Développé avec Python et Tkinter
             if item["write"] and not item["err"]:
                 self._write_count += 1
             
-            # Écriture en temps réel dans le fichier de scan
-            if self._current_scan_file:
-                try:
-                    with open(self._current_scan_file, "a", encoding="utf-8") as fh:
-                        fh.write(text + "\n")
-                        fh.flush()  # Force l'écriture immédiate
-                except Exception:
-                    pass  # Ignore les erreurs d'écriture pour ne pas ralentir le scan
+
             
             # Buffering pour l'affichage
             if item["err"]: 
