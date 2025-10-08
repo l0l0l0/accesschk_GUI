@@ -367,10 +367,9 @@ WRITE_REGEX = re.compile(r"(?:^|\s)(rw|w|write|write_data|file_write_data|file_w
 # Messages d'erreurs verbeux à ignorer (localisés)
 SUPPRESSED_ERROR_PATTERNS = (
     re.compile(r"error getting security", re.I),
-    re.compile(
-        r"la syntaxe du nom de fichier, de r[ée]pertoire ou de volume est incorrecte",
-        re.I,
-    ),
+    re.compile(r"la syntaxe du nom de fichier", re.I),
+    re.compile(r"répertoire ou de volume est incorrecte", re.I),
+    re.compile(r"repertoire ou de volume est incorrecte", re.I),
     re.compile(r"has a non-canonical DACL", re.I),
     re.compile(r"explicit deny after explicit allow", re.I),
     re.compile(r"explicit allow after inherited allow", re.I),
@@ -386,7 +385,8 @@ SUPPRESSED_ERROR_PATTERNS = (
 
 SUPPRESSED_ERROR_FOLDED_SNIPPETS = (
     "error getting security",
-    "la syntaxe du nom de fichier, de repertoire ou de volume est incorrecte",
+    "la syntaxe du nom de fichier",
+    "repertoire ou de volume est incorrecte",
     "has a non-canonical dacl",
     "explicit deny after explicit allow", 
     "explicit allow after inherited allow",
@@ -599,6 +599,16 @@ class AccessChkRunner:
                     
                     # Filtrage précoce des erreurs fréquentes pour améliorer les performances
                     if matches_suppressed_error(s):
+                        continue
+                    
+                    # Filtrage spécial pour l'erreur française très fréquente
+                    if "la syntaxe du nom de fichier" in s.lower():
+                        continue
+                    
+                    if "répertoire ou de volume est incorrecte" in s.lower():
+                        continue
+                        
+                    if "repertoire ou de volume est incorrecte" in s.lower():
                         continue
                     
                     if is_err and "Invalid account name" in s: 
