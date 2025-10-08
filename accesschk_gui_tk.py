@@ -1,10 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, threading, queue, subprocess, re, tkinter as tk
+import os, sys, threading, queue, subprocess, re, ctypes, getpass, tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 EXPORT_DEFAULT = "accesschk_filtered_logs.txt"
+
+
+def is_running_elevated() -> bool:
+    """Return True when the process has elevated/admin privileges."""
+    if os.name == "nt":
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    try:
+        geteuid = getattr(os, "geteuid", None)
+        return bool(geteuid and geteuid() == 0)
+    except Exception:
+        return False
+
+
+def current_user_principal() -> str:
+    """Best-effort resolution of the current user in DOMAIN\\User format."""
+    try:
+        user_env = os.environ.get("USERNAME")
+    except Exception:
+        user_env = None
+    try:
+        user = user_env or getpass.getuser()
+    except Exception:
+        user = user_env or ""
+    if os.name == "nt":
+        domain = os.environ.get("USERDOMAIN")
+        if domain and user:
+            return f"{domain}\\{user}"
+    return user
 
 # Détecte les lignes RW (format accesschk)
 LINE_RW_PREFIX = re.compile(r"^\s*RW\s+", re.I)
@@ -53,7 +84,9 @@ class AccessChkGUI(tk.Tk):
         self.BATCH_MAX=250; self._line_count=0; self._isdir_cache={}
         self.current_target = None
         self.current_principal = None
+        self.default_principal = current_user_principal()
         self._build_ui()
+        self.after(0, self._enforce_standard_user)
         self.after(100, self._poll_queue)
 
     def _build_ui(self):
@@ -63,15 +96,18 @@ class AccessChkGUI(tk.Tk):
         menubar.add_cascade(label="Aide", menu=helpmenu)
         self.config(menu=menubar)
 
+        ttk.Label(self, text="Cette application doit être lancée avec un utilisateur standard. L'utilisateur courant sera utilisé automatiquement.",
+                  foreground="firebrick").pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
+
         frm_top = ttk.Frame(self); frm_top.pack(side=tk.TOP, fill=tk.X, padx=8, pady=6)
         ttk.Label(frm_top, text="accesschk.exe :").grid(row=0, column=0, sticky=tk.W, padx=4)
         self.entry_accesschk = ttk.Entry(frm_top, width=70); self.entry_accesschk.grid(row=0, column=1, sticky=tk.W)
         self.entry_accesschk.insert(0, bundled_accesschk_path())
         ttk.Button(frm_top, text="Parcourir", command=self._browse_accesschk).grid(row=0, column=2, padx=6)
 
-        ttk.Label(frm_top, text="Principal (compte/groupe) :").grid(row=1, column=0, sticky=tk.W, padx=4, pady=(6,0))
-        self.entry_principal = ttk.Entry(frm_top, width=70); self.entry_principal.grid(row=1, column=1, sticky=tk.W, pady=(6,0))
-        self.entry_principal.insert(0, "")
+        ttk.Label(frm_top, text="Utilisateur courant :").grid(row=1, column=0, sticky=tk.W, padx=4, pady=(6,0))
+        self.var_principal = tk.StringVar(value=self.default_principal or "(introuvable)")
+        ttk.Label(frm_top, textvariable=self.var_principal).grid(row=1, column=1, sticky=tk.W, pady=(6,0))
         btns = ttk.Frame(frm_top); btns.grid(row=1, column=2, padx=6, pady=(6,0))
         self.btn_scan = ttk.Button(btns, text="Scan", command=self._on_scan); self.btn_scan.pack(side=tk.LEFT)
         self.btn_stop = ttk.Button(btns, text="Stop", command=self._on_stop, state=tk.DISABLED); self.btn_stop.pack(side=tk.LEFT, padx=(6,0))
@@ -87,7 +123,7 @@ class AccessChkGUI(tk.Tk):
         ent_filter = ttk.Entry(frm_filter, textvariable=self.var_filter, width=40); ent_filter.pack(side=tk.LEFT, padx=6)
         ent_filter.bind("<KeyRelease>", lambda e: self._render_logs())
         self.var_only_folders = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frm_filter, text="Only folders (RW)", variable=self.var_only_folders, command=self._render_logs).pack(side=tk.LEFT, padx=12)
+        ttk.Checkbutton(frm_filter, text="Only folders", variable=self.var_only_folders, command=self._render_logs).pack(side=tk.LEFT, padx=12)
         ttk.Button(frm_filter, text="Export (filtered)", command=self._export_filtered).pack(side=tk.RIGHT)
 
         frm_prog = ttk.Frame(self); frm_prog.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0,6))
@@ -108,9 +144,8 @@ class AccessChkGUI(tk.Tk):
 
     def _show_principal_help(self):
         messagebox.showinfo("Aide — Principal",
-            "Entrez le compte/groupe (Users, Utilisateurs, BUILTIN\\Users, DOMAINE\\Groupe, S-1-5-32-545).\n"
-            "Vide = essai auto : Utilisateurs → Users → BUILTIN\\Users → SID.\n"
-            "Astuce : 'whoami /groups' liste vos groupes.")
+            "Le compte utilisé pour le scan correspond automatiquement à l'utilisateur courant non administrateur.\n"
+            "Pour exécuter un scan avec un autre compte, relancez l'application en étant connecté avec ce compte standard.")
 
     def _browse_accesschk(self):
         p = filedialog.askopenfilename(title="Sélectionner accesschk.exe", filetypes=[("Executables","*.exe"), ("All files","*.*")])
@@ -129,11 +164,11 @@ class AccessChkGUI(tk.Tk):
             messagebox.showerror("Erreur", "accesschk.exe introuvable dans le même dossier. Sélectionnez-le."); return
         raw_targets = self.entry_target.get().strip() or default_targets_string()
         targets = [t.strip().strip('"') for t in raw_targets.split(";") if t.strip()]
-        principal = self.entry_principal.get().strip()
+        principal = self.default_principal.strip() if self.default_principal else ""
 
         self.logs.clear(); self._line_count=0; self._isdir_cache.clear()
         self.txt.configure(state=tk.NORMAL); self.txt.delete("1.0", tk.END); self.txt.configure(state=tk.DISABLED)
-        principal_label = principal or "(auto)"
+        principal_label = principal or "(introuvable)"
         self.status_var.set(f"Préparation du scan : {principal_label} sur {len(targets)} cible(s). 0 lignes")
         self.running=True
         self.current_target = None
@@ -313,6 +348,12 @@ class AccessChkGUI(tk.Tk):
     def _show_context_menu(self, event):
         try: self.menu.tk_popup(event.x_root, event.y_root)
         finally: self.menu.grab_release()
+
+    def _enforce_standard_user(self):
+        if is_running_elevated():
+            messagebox.showerror("Droits élevés détectés",
+                                 "Cette application doit être lancée avec un utilisateur standard.")
+            self.after(100, self.on_close)
     def on_close(self):
         try:
             if self.proc and self.proc.poll() is None: self.proc.kill()
