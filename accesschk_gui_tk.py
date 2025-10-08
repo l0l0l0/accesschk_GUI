@@ -37,10 +37,10 @@ class AppConfig:
     """Configuration centralisée de l'application."""
     
     # Performance
-    BATCH_SIZE = 100  # Réduit de 250 à 100 pour plus de responsivité
-    BATCH_TIMEOUT_MS = 50  # Timeout plus court
-    UI_UPDATE_INTERVAL_MS = 75  # Plus fréquent
-    MAX_DISPLAYED_LINES = 10000  # Limite pour éviter les ralentissements
+    BATCH_SIZE = 50  # Réduit encore plus pour éviter les blocages
+    BATCH_TIMEOUT_MS = 25  # Timeout plus court pour plus de fluidité
+    UI_UPDATE_INTERVAL_MS = 50  # Très fréquent pour éviter les arrêts
+    MAX_DISPLAYED_LINES = 5000  # Limite réduite pour meilleures performances
     
     # UI
     WINDOW_WIDTH = 1100
@@ -419,7 +419,21 @@ def _normalize_for_error_matching(text: str) -> str:
 
 def matches_suppressed_error(text: str) -> bool:
     """True when ``text`` corresponds to a known noisy AccessChk error message."""
-
+    
+    # Version ultra-rapide : vérification par mots-clés AVANT regex coûteuses
+    text_lower = text.lower()
+    
+    # Vérifications rapides par mots-clés (plus rapide que regex)
+    fast_checks = [
+        'syntaxe', 'répertoire', 'repertoire', 'incorrecte',
+        'canonical', 'explicit', 'denied', 'security',
+        'introuvable', 'refusé', 'refuse', 'cannot find'
+    ]
+    
+    if any(keyword in text_lower for keyword in fast_checks):
+        return True
+    
+    # Fallback vers l'ancienne méthode seulement si nécessaire
     if any(p.search(text) for p in SUPPRESSED_ERROR_PATTERNS):
         return True
     folded = _normalize_for_error_matching(text)
@@ -594,14 +608,24 @@ class AccessChkRunner:
                     
                     s = decode_bytes_with_fallback(chunk).rstrip("\r\n")
                     
+                    # Filtrage ultra-rapide par vérification de caractères clés AVANT toute autre opération
+                    if s and len(s) > 10:  # Éviter les vérifications sur lignes vides/courtes
+                        # Vérification rapide par caractères pour les erreurs françaises
+                        if 'syntaxe' in s or 'répertoire' in s or 'repertoire' in s or 'incorrecte' in s:
+                            continue
+                        # Vérification rapide pour les erreurs anglaises
+                        if 'canonical' in s or 'explicit' in s or 'denied' in s:
+                            continue
+                    
                     if not is_err and contains_cjk(s):
                         continue
                     
                     # Filtrage précoce des erreurs fréquentes pour améliorer les performances
+                    # (gardé en backup mais normalement pas nécessaire avec le filtrage ci-dessus)
                     if matches_suppressed_error(s):
                         continue
                     
-                    # Filtrage spécial pour l'erreur française très fréquente
+                    # Filtrage spécial pour l'erreur française très fréquente (backup)
                     if "la syntaxe du nom de fichier" in s.lower():
                         continue
                     
@@ -614,7 +638,17 @@ class AccessChkRunner:
                     if is_err and "Invalid account name" in s: 
                         invalid = True
                     
-                    has_write = bool(WRITE_REGEX.search(s)) if not is_err else False
+                    # Éviter le regex WRITE_REGEX sur les erreurs connues pour gagner du temps
+                    if is_err or any(err_word in s.lower() for err_word in ['error', 'erreur', 'syntaxe', 'canonical']):
+                        has_write = False
+                    else:
+                        has_write = bool(WRITE_REGEX.search(s))
+                    
+                    # Éviter de surcharger la queue - pause si elle devient trop pleine
+                    if self.queue.qsize() > 500:  # Réduit de 1000 à 500 pour être plus réactif
+                        import time
+                        time.sleep(0.0005)  # Pause encore plus courte
+                    
                     self.queue.put({"line": s, "write": has_write, "err": is_err})
             except (UnicodeError, IOError) as e:
                 logger.warning(f"Erreur lors de la lecture du flux: {e}")
@@ -1229,12 +1263,22 @@ Développé avec Python et Tkinter
         processed = 0
         buf_normal, buf_write, buf_err = [], [], []
         
-        # Traitement par batch avec limite de temps
-        while processed < self.app_config.BATCH_SIZE and (time.time() - start_time) < (self.app_config.BATCH_TIMEOUT_MS / 1000):
+        # Traitement par batch avec limite de temps ET de lignes pour éviter les blocages
+        max_iterations = self.app_config.BATCH_SIZE * 2  # Limite absolue d'itérations
+        iteration_count = 0
+        while (processed < self.app_config.BATCH_SIZE and 
+               (time.time() - start_time) < (self.app_config.BATCH_TIMEOUT_MS / 1000) and
+               iteration_count < max_iterations):
             try: 
                 item = self.q.get_nowait()
             except queue.Empty: 
                 break
+            
+            iteration_count += 1
+            
+            # Pause micro pour éviter les blocages sur gros volumes
+            if iteration_count % 10 == 0:
+                self.update_idletasks()
             
             if "_status" in item:
                 self.status_var.set(item["_status"])
