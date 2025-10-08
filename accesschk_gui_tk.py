@@ -1,7 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, threading, queue, subprocess, re, ctypes, getpass, difflib, tkinter as tk
+"""Interface graphique simplifiée pour AccessChk.
+
+Ce module encapsule toute la logique permettant d'exécuter l'outil
+``accesschk.exe`` depuis une interface Tkinter, d'afficher les résultats,
+et de faciliter leur exportation/comparaison. Toutes les fonctions et
+méthodes sont volontairement documentées pour clarifier le rôle de chaque
+étape du flux de traitement.
+"""
+
+import os
+import sys
+import threading
+import queue
+import subprocess
+import re
+import ctypes
+import getpass
+import difflib
+import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 EXPORT_DEFAULT = "accesschk_filtered_logs.txt"
@@ -46,16 +64,29 @@ WRITE_REGEX = re.compile(r"(?:^|\s)(rw|w|write|write_data|file_write_data|file_w
 # Extrait le premier chemin de type Windows/UNC
 PATH_EXTRACT = re.compile(r"(?:[A-Za-z]:\\|\\\\[^\\]+\\)[^\r\n]*")
 def extract_first_path(s: str):
+    """Retourne la première occurrence de chemin Windows/UNC trouvée dans ``s``."""
+
     m = PATH_EXTRACT.search(s)
     return m.group(0).strip().rstrip('"') if m else None
 
 ASCII_ALNUM = re.compile(r"[A-Za-z0-9]")
+CJK_CHARS = re.compile(r"[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uAC00-\uD7AF]")
+
+
+def contains_cjk(text: str) -> bool:
+    """Indique si ``text`` contient des caractères du bloc CJK (chinois/japonais/etc.)."""
+
+    return bool(CJK_CHARS.search(text))
 
 def bundled_accesschk_path() -> str:
+    """Retourne le chemin d'``accesschk.exe`` situé à côté du script ou de l'exécutable."""
+
     base = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
     return os.path.join(base, "accesschk.exe")
 
 def decode_bytes_with_fallback(b: bytes) -> str:
+    """Décode une chaîne d'octets en essayant plusieurs encodages classiques."""
+
     for enc in ("utf-8", "utf-16", "cp850", "cp437", "cp1252", "latin-1"):
         try:
             return b.decode(enc, errors="strict")
@@ -64,12 +95,18 @@ def decode_bytes_with_fallback(b: bytes) -> str:
     return b.decode("latin-1", errors="replace")
 
 def default_targets_string() -> str:
+    """Valeur par défaut affichée dans le champ des cibles."""
+
     if os.name == "nt":
         return "C:\\"
     return os.path.sep
 
 class AccessChkGUI(tk.Tk):
+    """Fenêtre principale gérant l'intégralité des interactions utilisateur."""
+
     def __init__(self):
+        """Initialise l'interface et les structures de stockage en mémoire."""
+
         super().__init__()
         self.title("AccessChk GUI v1.10")
         self.geometry("1100x800"); self.minsize(880, 620)
@@ -96,6 +133,8 @@ class AccessChkGUI(tk.Tk):
         self.after(100, self._poll_queue)
 
     def _build_ui(self):
+        """Construit tous les widgets de la fenêtre principale."""
+
         menubar = tk.Menu(self)
         helpmenu = tk.Menu(menubar, tearoff=0)
         helpmenu.add_command(label="Aide sur 'Principal'...", command=self._show_principal_help)
@@ -154,20 +193,28 @@ class AccessChkGUI(tk.Tk):
         self._update_compare_state()
 
     def _show_principal_help(self):
+        """Affiche une boîte d'information détaillant l'utilisation du champ 'Principal'."""
+
         messagebox.showinfo("Aide — Principal",
             "Le compte utilisé pour le scan correspond automatiquement à l'utilisateur courant non administrateur.\n"
             "Pour exécuter un scan avec un autre compte, relancez l'application en étant connecté avec ce compte standard.")
 
     def _browse_accesschk(self):
+        """Ouvre un sélecteur de fichier pour choisir ``accesschk.exe``."""
+
         p = filedialog.askopenfilename(title="Sélectionner accesschk.exe", filetypes=[("Executables","*.exe"), ("All files","*.*")])
         if p: self.entry_accesschk.delete(0, tk.END); self.entry_accesschk.insert(0, p)
 
     def _browse_target_replace(self):
+        """Ouvre un sélecteur de dossier qui remplace la liste de cibles actuelle."""
+
         p = filedialog.askdirectory(title="Choisir un dossier (remplace la liste actuelle)", mustexist=True)
         if p: self.entry_target.delete(0, tk.END); self.entry_target.insert(0, os.path.normpath(p))
 
     # ---- core ----
     def _on_scan(self, mode="baseline"):
+        """Démarre un scan AccessChk dans un thread en fonction du ``mode`` sélectionné."""
+
         if self.proc is not None and self.proc.poll() is None:
             messagebox.showwarning("Scan en cours", "Un scan est déjà en cours."); return
         accesschk = self.entry_accesschk.get().strip()
@@ -194,6 +241,8 @@ class AccessChkGUI(tk.Tk):
         threading.Thread(target=self._run_accesschk_thread, args=(accesschk, targets, principal), daemon=True).start()
 
     def _on_stop(self):
+        """Arrête le scan en cours (si un processus est actif)."""
+
         try:
             if self.proc and self.proc.poll() is None:
                 self.proc.kill()
@@ -211,6 +260,8 @@ class AccessChkGUI(tk.Tk):
             self.current_principal = None
 
     def _run_accesschk_thread(self, accesschk, targets, principal):
+        """Thread lançant AccessChk et réinjectant les lignes dans la file d'attente UI."""
+
         try:
             principals = [principal] if principal else ["Utilisateurs", "Users", r"BUILTIN\Users", "S-1-5-32-545"]
             last_rc = 0
@@ -249,11 +300,18 @@ class AccessChkGUI(tk.Tk):
 
                     invalid = False
                     def reader(stream, is_err=False):
+                        """Lit un flux AccessChk et pousse les lignes dans la file d'attente."""
+
                         nonlocal invalid
                         while True:
                             chunk = stream.readline()
                             if not chunk: break
                             s = decode_bytes_with_fallback(chunk).rstrip("\r\n")
+                            # Certaines versions d'AccessChk retournent ponctuellement des
+                            # caractères « CJK » parasites : on les ignore pour garder les
+                            # journaux lisibles.
+                            if not is_err and contains_cjk(s):
+                                continue
                             if is_err and "Invalid account name" in s: invalid = True
                             has_write = bool(WRITE_REGEX.search(s)) if not is_err else False
                             self.q.put({"line": s, "write": has_write, "err": is_err})
@@ -271,6 +329,8 @@ class AccessChkGUI(tk.Tk):
 
     # ---- queue / UI ----
     def _poll_queue(self):
+        """Récupère les éléments de la file d'attente et met à jour l'affichage."""
+
         processed=0; buf_normal=[]; buf_write=[]; buf_err=[]
         while processed < self.BATCH_MAX:
             try: item = self.q.get_nowait()
@@ -313,6 +373,8 @@ class AccessChkGUI(tk.Tk):
         self.after(100, self._poll_queue)
 
     def _finish_scan(self, returncode: int):
+        """Finalise un scan : mise à jour du statut et sauvegarde éventuelle."""
+
         self.proc = None
         self.running = False
         self.pbar.stop()
@@ -329,6 +391,8 @@ class AccessChkGUI(tk.Tk):
             self._update_compare_state()
 
     def _remove_last_log_entry(self, buf_normal, buf_write, buf_err):
+        """Supprime la dernière ligne stockée pour synchroniser les tampons d'affichage."""
+
         if not self.logs:
             return False
         last = self.logs.pop()
@@ -343,6 +407,8 @@ class AccessChkGUI(tk.Tk):
         return True
 
     def _suppress_error_sequence(self, buf_normal, buf_write, buf_err):
+        """Nettoie les lignes de bruit qui suivent un message d'erreur AccessChk."""
+
         removed = False
 
         def remove_last_if(predicate):
@@ -363,13 +429,15 @@ class AccessChkGUI(tk.Tk):
             lambda it: not it["err"]
             and not it["write"]
             and not LINE_RW_PREFIX.search(it["line"])
-            and not ASCII_ALNUM.search(it["line"])
+            and (contains_cjk(it["line"]) or not ASCII_ALNUM.search(it["line"]))
         ):
             pass
         return removed
 
     # ---- filtering / export ----
     def _is_dir_cached(self, path: str) -> bool:
+        """Teste si ``path`` est un dossier en mémorisant le résultat."""
+
         key = path.lower()
         if key in self._isdir_cache: return self._isdir_cache[key]
         try: isd = os.path.isdir(path)
@@ -378,6 +446,8 @@ class AccessChkGUI(tk.Tk):
         return isd
 
     def _render_logs(self):
+        """Ré-affiche le contenu filtré des journaux dans la zone de texte."""
+
         self.txt.configure(state=tk.NORMAL); self.txt.delete("1.0", tk.END)
         norm, writ, err = [], [], []
         for it in self._filtered_logs():
@@ -394,6 +464,8 @@ class AccessChkGUI(tk.Tk):
         self.txt.see(tk.END); self.txt.configure(state=tk.DISABLED)
 
     def _filtered_logs(self, filter_text=None, only_dirs=None):
+        """Génère les lignes filtrées selon la saisie utilisateur."""
+
         f = (self.var_filter.get() if filter_text is None else filter_text).strip().lower()
         only_dirs = self.var_only_folders.get() if only_dirs is None else only_dirs
         for it in self.logs:
@@ -411,6 +483,8 @@ class AccessChkGUI(tk.Tk):
             yield it
 
     def _filter_lines_for_diff(self, lines):
+        """Prépare une liste de lignes comparables pour la génération d'un diff."""
+
         filtered = []
         for line in lines:
             if not line:
@@ -429,6 +503,8 @@ class AccessChkGUI(tk.Tk):
         return filtered
 
     def _export_filtered(self):
+        """Exporte les lignes actuellement visibles vers un fichier texte."""
+
         if not self.logs: messagebox.showinfo("Export", "Aucun log à exporter."); return
         path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files","*.txt"), ("All files","*.*")], initialfile=EXPORT_DEFAULT)
         if not path: return
@@ -442,6 +518,8 @@ class AccessChkGUI(tk.Tk):
 
     # ---- misc ----
     def _persist_scan_results(self):
+        """Sauvegarde les résultats d'un scan dans un fichier temporaire."""
+
         mode = self.scan_mode
         self.scan_mode = None
         if not mode:
@@ -467,6 +545,8 @@ class AccessChkGUI(tk.Tk):
             self._handle_compare_diff(lines)
 
     def _handle_compare_diff(self, current_lines):
+        """Compare le scan courant au scan initial puis affiche/enregistre le diff."""
+
         try:
             with open(self.base_scan_path, "r", encoding="utf-8") as fh:
                 base_lines = fh.read().splitlines()
@@ -505,6 +585,8 @@ class AccessChkGUI(tk.Tk):
             messagebox.showinfo("Scan comparaison", "Aucune différence RW détectée entre les scans.")
 
     def _show_diff_window(self, diff_lines):
+        """Ouvre une fenêtre contenant le diff généré entre deux scans."""
+
         win = tk.Toplevel(self)
         win.title("Différence entre les scans")
         win.geometry("900x600")
@@ -545,6 +627,8 @@ class AccessChkGUI(tk.Tk):
         txt.configure(xscrollcommand=xscroll.set)
 
     def _update_compare_state(self):
+        """Active/désactive les boutons de scan selon l'état courant."""
+
         if self.running:
             self.btn_scan_base.configure(state=tk.DISABLED)
             self.btn_scan_compare.configure(state=tk.DISABLED)
@@ -554,6 +638,8 @@ class AccessChkGUI(tk.Tk):
             self.btn_scan_compare.configure(state=state_compare)
 
     def _safe_remove(self, path: str):
+        """Supprime silencieusement un fichier (utilisé pour les fichiers temporaires)."""
+
         try:
             if path and os.path.isfile(path):
                 os.remove(path)
@@ -561,18 +647,27 @@ class AccessChkGUI(tk.Tk):
             pass
 
     def _copy_selection(self):
+        """Copie la sélection actuelle de la zone de texte dans le presse-papiers."""
+
         try: sel = self.txt.selection_get(); self.clipboard_clear(); self.clipboard_append(sel)
         except Exception: pass
+
     def _show_context_menu(self, event):
+        """Affiche le menu contextuel personnalisé du widget texte."""
+
         try: self.menu.tk_popup(event.x_root, event.y_root)
         finally: self.menu.grab_release()
 
     def _enforce_standard_user(self):
+        """Vérifie que l'application n'est pas exécutée avec des privilèges élevés."""
+
         if is_running_elevated():
             messagebox.showerror("Droits élevés détectés",
                                  "Cette application doit être lancée avec un utilisateur standard.")
             self.after(100, self.on_close)
     def on_close(self):
+        """Ferme proprement la fenêtre principale en stoppant les processus éventuels."""
+
         try:
             if self.proc and self.proc.poll() is None: self.proc.kill()
         except Exception: pass
@@ -580,9 +675,13 @@ class AccessChkGUI(tk.Tk):
         self.destroy()
 
     def _cleanup_scan_files(self):
+        """Supprime les fichiers temporaires de scan générés par l'application."""
+
         for path in (self.base_scan_path, self.compare_scan_path, self.diff_output_path):
             self._safe_remove(path)
 
 def main():
+    """Point d'entrée : instancie la fenêtre principale et lance la boucle Tk."""
+
     app=AccessChkGUI(); app.protocol("WM_DELETE_WINDOW", app.on_close); app.mainloop()
 if __name__ == "__main__": main()
