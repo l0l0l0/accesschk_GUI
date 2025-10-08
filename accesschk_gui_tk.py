@@ -1689,8 +1689,21 @@ Développé avec Python et Tkinter
                 tofile="",
                 lineterm="",
             )
-            if line and not line.startswith("---") and not line.startswith("+++")
+            if line and not line.startswith("---") and not line.startswith("+++") and not line.startswith("@@")
         ]
+        
+        # Filtrer les lignes pour ne garder que les nouveaux droits RW (lignes commençant par +)
+        # et exclure les lignes qui montrent la suppression d'anciens droits RW (lignes commençant par -)
+        filtered_diff_lines = []
+        for line in diff_lines:
+            # Garder seulement les ajouts de nouveaux droits RW
+            if line.startswith("+") and "RW" in line:
+                filtered_diff_lines.append(line)
+            # Garder aussi les chemins de répertoires (sans + ou -)
+            elif not line.startswith(("+", "-")) and extract_first_path(line):
+                filtered_diff_lines.append(line)
+        
+        diff_lines = filtered_diff_lines
         if diff_lines:
             diff_text = "\n".join(diff_lines)
             try:
