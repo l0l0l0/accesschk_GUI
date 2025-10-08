@@ -1,0 +1,8 @@
+2025-10-08 14:04:47,943 - WARNING - Chemin non trouvé (sera ignoré par accesschk): D:\Test [Folder]\subfolder
+2025-10-08 14:04:47,943 - WARNING - Chemin non trouvé (sera ignoré par accesschk): E:\Data {backup}\files
+2025-10-08 14:04:47,944 - WARNING - Chemin non trouvé (sera ignoré par accesschk): C:\test
+2025-10-08 14:04:47,944 - WARNING - Chemin non trouvé (sera ignoré par accesschk): echo semicolon
+2025-10-08 14:05:23,951 - WARNING - Chemin non trouvé (sera ignoré par accesschk): D:\Test [Folder]\subfolder
+2025-10-08 14:05:23,951 - WARNING - Chemin non trouvé (sera ignoré par accesschk): E:\Data {backup}\files
+2025-10-08 14:05:23,952 - WARNING - Chemin non trouvé (sera ignoré par accesschk): C:\test
+2025-10-08 14:05:23,952 - WARNING - Chemin non trouvé (sera ignoré par accesschk): echo semicolon

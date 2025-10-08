@@ -23,6 +23,10 @@ import difflib
 import logging
 import shlex
 import time
+import json
+import csv
+import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple, Union
 import tkinter as tk
@@ -52,7 +56,7 @@ class AppConfig:
     # Sécurité
     MAX_PATH_LENGTH = 260
     ALLOWED_EXTENSIONS = {'.exe'}
-    DANGEROUS_CHARS = ['&', '|', ';', '$', '`', '(', ')', '{', '}', '[', ']', '<', '>']
+    DANGEROUS_CHARS = ['&', '|', ';', '$', '`', '<', '>']  # Supprimé (), {}, [] qui sont valides dans les chemins
     
     # AccessChk
     PROGRESS_BAR_SPEED = 30  # Réduit de 60 pour moins de consommation CPU
@@ -133,17 +137,24 @@ def validate_target_paths(paths_str: str) -> Tuple[bool, str, List[str]]:
     
     validated_paths = []
     for path in raw_paths:
-        # Check for dangerous characters
-        if any(char in path for char in DANGEROUS_CHARS):
-            return False, f"Chemin dangereux détecté: {path}", []
+        # Check for really dangerous characters in individual paths
+        # Note: semicolon is only dangerous within a single path, not as separator
+        path_dangerous_chars = ['&', '|', '$', '`', '<', '>']
+        # Check for semicolon within the path (not at boundaries)
+        if ';' in path.strip():
+            path_dangerous_chars.append(';')
+            
+        dangerous_found = [char for char in path_dangerous_chars if char in path]
+        if dangerous_found:
+            return False, f"Caractères dangereux détectés dans '{path}': {', '.join(dangerous_found)}", []
         
         # Normalize path
         try:
             normalized = os.path.normpath(path)
             if len(normalized) > MAX_PATH_LENGTH:
                 return False, f"Chemin trop long: {path}", []
-        except (OSError, ValueError):
-            return False, f"Chemin invalide: {path}", []
+        except (OSError, ValueError) as e:
+            return False, f"Chemin invalide '{path}': {str(e)}", []
         
         # Check if path exists (warning only, not blocking)
         if not os.path.exists(normalized):
@@ -168,14 +179,15 @@ def sanitize_command_args(args: List[str]) -> List[str]:
         if not isinstance(arg, str):
             continue
         
-        # Remove dangerous characters and validate
-        if any(char in arg for char in DANGEROUS_CHARS):
-            # For paths, we already validated them above
-            # For other args, we can safely quote them
+        # Check for really dangerous characters (not parentheses, brackets which are valid)
+        dangerous_found = [char for char in DANGEROUS_CHARS if char in arg]
+        if dangerous_found:
+            # For paths, we already validated them above, so this shouldn't happen
+            # For other args, we can safely quote them if they contain spaces but no dangerous chars
             if os.path.exists(arg) or arg.startswith('-') or arg in ['accepteula', 'nobanner']:
                 sanitized.append(shlex.quote(arg))
             else:
-                logging.warning(f"Argument potentiellement dangereux ignoré: {arg}")
+                logging.warning(f"Argument potentiellement dangereux ignoré: {arg} (caractères: {', '.join(dangerous_found)})")
         else:
             sanitized.append(arg)
     
@@ -192,6 +204,135 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+class ScanHistoryManager:
+    """Gestionnaire de l'historique des scans."""
+    
+    def __init__(self, storage_dir: str):
+        self.storage_dir = storage_dir
+        self.history_file = os.path.join(storage_dir, "scan_history.json")
+        self.max_history = 20  # Nombre maximum d'entrées dans l'historique
+    
+    def add_scan(self, scan_type: str, targets: List[str], principal: str, result_count: int) -> None:
+        """Ajoute un scan à l'historique."""
+        try:
+            history = self._load_history()
+            
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "scan_type": scan_type,
+                "targets": targets,
+                "principal": principal,
+                "result_count": result_count
+            }
+            
+            history.insert(0, entry)  # Ajouter au début
+            
+            # Limiter la taille de l'historique
+            if len(history) > self.max_history:
+                history = history[:self.max_history]
+            
+            self._save_history(history)
+        except Exception as e:
+            logger.warning(f"Impossible de sauvegarder l'historique: {e}")
+    
+    def get_history(self) -> List[Dict]:
+        """Récupère l'historique des scans."""
+        return self._load_history()
+    
+    def clear_history(self) -> None:
+        """Efface l'historique des scans."""
+        try:
+            if os.path.exists(self.history_file):
+                os.remove(self.history_file)
+        except Exception as e:
+            logger.warning(f"Impossible d'effacer l'historique: {e}")
+    
+    def _load_history(self) -> List[Dict]:
+        """Charge l'historique depuis le fichier."""
+        try:
+            if os.path.exists(self.history_file):
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.debug(f"Erreur lors du chargement de l'historique: {e}")
+        return []
+    
+    def _save_history(self, history: List[Dict]) -> None:
+        """Sauvegarde l'historique dans le fichier."""
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"Erreur lors de la sauvegarde de l'historique: {e}")
+
+
+class ExportManager:
+    """Gestionnaire des exports multi-formats."""
+    
+    @staticmethod
+    def export_to_csv(logs: List[Dict], filepath: str) -> None:
+        """Exporte les logs au format CSV."""
+        with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
+            fieldnames = ['timestamp', 'type', 'permissions', 'path', 'user']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            writer.writeheader()
+            for log in logs:
+                line = log['line']
+                writer.writerow({
+                    'timestamp': datetime.now().isoformat(),
+                    'type': 'error' if log['err'] else ('write' if log['write'] else 'read'),
+                    'permissions': line,
+                    'path': extract_first_path(line) or '',
+                    'user': 'current_user'
+                })
+    
+    @staticmethod
+    def export_to_json(logs: List[Dict], filepath: str) -> None:
+        """Exporte les logs au format JSON."""
+        export_data = {
+            'export_timestamp': datetime.now().isoformat(),
+            'total_entries': len(logs),
+            'entries': []
+        }
+        
+        for log in logs:
+            entry = {
+                'line': log['line'],
+                'has_write': log['write'],
+                'is_error': log['err'],
+                'path': extract_first_path(log['line']),
+                'timestamp': datetime.now().isoformat()
+            }
+            export_data['entries'].append(entry)
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(export_data, f, indent=2, ensure_ascii=False)
+    
+    @staticmethod
+    def export_to_xml(logs: List[Dict], filepath: str) -> None:
+        """Exporte les logs au format XML."""
+        root = ET.Element('accesschk_scan')
+        root.set('timestamp', datetime.now().isoformat())
+        root.set('total_entries', str(len(logs)))
+        
+        for log in logs:
+            entry = ET.SubElement(root, 'entry')
+            entry.set('has_write', str(log['write']))
+            entry.set('is_error', str(log['err']))
+            
+            line_elem = ET.SubElement(entry, 'line')
+            line_elem.text = log['line']
+            
+            path = extract_first_path(log['line'])
+            if path:
+                path_elem = ET.SubElement(entry, 'path')
+                path_elem.text = path
+        
+        tree = ET.ElementTree(root)
+        tree.write(filepath, encoding='utf-8', xml_declaration=True)
 
 
 def current_user_principal() -> str:
@@ -480,10 +621,19 @@ class AccessChkGUI(tk.Tk):
         self.geometry(f"{AppConfig.WINDOW_WIDTH}x{AppConfig.WINDOW_HEIGHT}")
         self.minsize(AppConfig.MIN_WIDTH, AppConfig.MIN_HEIGHT)
         
+        # Chemins de fichiers
+        base_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
+        self.storage_dir = base_dir
+        self.base_scan_path = os.path.join(base_dir, "scan_initial.txt")
+        self.compare_scan_path = os.path.join(base_dir, "scan_comparatif.txt")
+        self.diff_output_path = os.path.join(base_dir, "scan_diff.txt")
+        
         # Configuration et composants
         self.app_config = AppConfig()
         self.q = queue.Queue()
         self.runner = AccessChkRunner(self.app_config, self.q)
+        self.history_manager = ScanHistoryManager(base_dir)
+        self.export_manager = ExportManager()
         
         # État de l'application
         self.logs = []
@@ -503,13 +653,6 @@ class AccessChkGUI(tk.Tk):
         self.default_principal = current_user_principal()
         self.scan_mode = None
         
-        # Chemins de fichiers
-        base_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
-        self.storage_dir = base_dir
-        self.base_scan_path = os.path.join(base_dir, "scan_initial.txt")
-        self.compare_scan_path = os.path.join(base_dir, "scan_comparatif.txt")
-        self.diff_output_path = os.path.join(base_dir, "scan_diff.txt")
-        
         # Nettoyage des fichiers temporaires
         for leftover in (self.compare_scan_path, self.diff_output_path):
             try:
@@ -526,10 +669,51 @@ class AccessChkGUI(tk.Tk):
         """Construit tous les widgets de la fenêtre principale."""
 
         menubar = tk.Menu(self)
+        
+        # Menu Fichier
+        filemenu = tk.Menu(menubar, tearoff=0)
+        filemenu.add_command(label="Nouveau scan initial", command=lambda: self._on_scan("baseline"), accelerator="Ctrl+N")
+        filemenu.add_command(label="Scan de comparaison", command=lambda: self._on_scan("compare"), accelerator="Ctrl+R")
+        filemenu.add_separator()
+        
+        # Sous-menu Export
+        exportmenu = tk.Menu(filemenu, tearoff=0)
+        exportmenu.add_command(label="Export TXT", command=self._export_filtered, accelerator="Ctrl+E")
+        exportmenu.add_command(label="Export CSV", command=self._export_csv)
+        exportmenu.add_command(label="Export JSON", command=self._export_json)
+        exportmenu.add_command(label="Export XML", command=self._export_xml)
+        filemenu.add_cascade(label="Exporter", menu=exportmenu)
+        
+        filemenu.add_command(label="Historique des scans", command=self._show_history)
+        filemenu.add_separator()
+        filemenu.add_command(label="Quitter", command=self.on_close, accelerator="Ctrl+Q")
+        menubar.add_cascade(label="Fichier", menu=filemenu)
+        
+        # Menu Edition
+        editmenu = tk.Menu(menubar, tearoff=0)
+        editmenu.add_command(label="Copier sélection", command=self._copy_selection, accelerator="Ctrl+C")
+        editmenu.add_command(label="Sélectionner tout", command=self._select_all, accelerator="Ctrl+A")
+        editmenu.add_separator()
+        editmenu.add_command(label="Effacer logs", command=self._clear_logs, accelerator="Ctrl+L")
+        menubar.add_cascade(label="Edition", menu=editmenu)
+        
+        # Menu Vue
+        viewmenu = tk.Menu(menubar, tearoff=0)
+        viewmenu.add_command(label="Afficher seulement dossiers", command=self._toggle_folders_only, accelerator="Ctrl+D")
+        viewmenu.add_command(label="Rechercher", command=self._focus_filter, accelerator="Ctrl+F")
+        menubar.add_cascade(label="Vue", menu=viewmenu)
+        
+        # Menu Aide
         helpmenu = tk.Menu(menubar, tearoff=0)
         helpmenu.add_command(label="Aide sur 'Principal'...", command=self._show_principal_help)
+        helpmenu.add_command(label="Raccourcis clavier", command=self._show_shortcuts_help, accelerator="F1")
+        helpmenu.add_command(label="À propos", command=self._show_about)
         menubar.add_cascade(label="Aide", menu=helpmenu)
+        
         self.config(menu=menubar)
+
+        # Raccourcis clavier
+        self._setup_keyboard_shortcuts()
 
         ttk.Label(self, text="Cette application doit être lancée avec un utilisateur standard. L'utilisateur courant sera utilisé automatiquement.",
                   foreground="firebrick").pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 0))
@@ -559,8 +743,9 @@ class AccessChkGUI(tk.Tk):
         frm_filter = ttk.Frame(self); frm_filter.pack(side=tk.TOP, fill=tk.X, padx=8, pady=6)
         ttk.Label(frm_filter, text="Filtre (substring, case-insensitive) :").pack(side=tk.LEFT)
         self.var_filter = tk.StringVar()
-        ent_filter = ttk.Entry(frm_filter, textvariable=self.var_filter, width=40); ent_filter.pack(side=tk.LEFT, padx=6)
-        ent_filter.bind("<KeyRelease>", lambda e: self._render_logs())
+        self.entry_filter = ttk.Entry(frm_filter, textvariable=self.var_filter, width=40)
+        self.entry_filter.pack(side=tk.LEFT, padx=6)
+        self.entry_filter.bind("<KeyRelease>", lambda e: self._render_logs())
         self.var_only_folders = tk.BooleanVar(value=False)
         ttk.Checkbutton(frm_filter, text="Only folders", variable=self.var_only_folders, command=self._render_logs).pack(side=tk.LEFT, padx=12)
         ttk.Button(frm_filter, text="Export (filtered)", command=self._export_filtered).pack(side=tk.RIGHT)
@@ -581,6 +766,97 @@ class AccessChkGUI(tk.Tk):
         self.menu = tk.Menu(self, tearoff=0); self.menu.add_command(label="Copier", command=self._copy_selection)
         self.txt.bind("<Button-3>", self._show_context_menu)
         self._update_compare_state()
+
+    def _setup_keyboard_shortcuts(self) -> None:
+        """Configure les raccourcis clavier."""
+        self.bind_all("<Control-n>", lambda e: self._on_scan("baseline"))
+        self.bind_all("<Control-r>", lambda e: self._on_scan("compare"))
+        self.bind_all("<Control-e>", lambda e: self._export_filtered())
+        self.bind_all("<Control-q>", lambda e: self.on_close())
+        self.bind_all("<Control-c>", lambda e: self._copy_selection())
+        self.bind_all("<Control-a>", lambda e: self._select_all())
+        self.bind_all("<Control-l>", lambda e: self._clear_logs())
+        self.bind_all("<Control-d>", lambda e: self._toggle_folders_only())
+        self.bind_all("<Control-f>", lambda e: self._focus_filter())
+        self.bind_all("<F1>", lambda e: self._show_shortcuts_help())
+        self.bind_all("<Escape>", lambda e: self._on_stop())
+
+    def _focus_filter(self) -> None:
+        """Met le focus sur le champ de filtre."""
+        try:
+            self.entry_filter.focus_set()
+            self.entry_filter.select_range(0, tk.END)
+        except AttributeError:
+            pass
+
+    def _clear_logs(self) -> None:
+        """Efface tous les logs affichés."""
+        if not self.running and messagebox.askyesno("Effacer les logs", "Êtes-vous sûr de vouloir effacer tous les logs ?"):
+            self.logs.clear()
+            self._line_count = 0
+            self._write_count = 0
+            self.txt.configure(state=tk.NORMAL)
+            self.txt.delete("1.0", tk.END)
+            self.txt.configure(state=tk.DISABLED)
+            self.status_var.set("Logs effacés")
+
+    def _select_all(self) -> None:
+        """Sélectionne tout le texte dans la zone d'affichage."""
+        try:
+            self.txt.tag_add(tk.SEL, "1.0", tk.END)
+            self.txt.mark_set(tk.INSERT, "1.0")
+            self.txt.see(tk.INSERT)
+        except tk.TclError:
+            pass
+
+    def _toggle_folders_only(self) -> None:
+        """Bascule l'affichage des dossiers uniquement."""
+        current_state = self.var_only_folders.get()
+        self.var_only_folders.set(not current_state)
+        self._render_logs()
+
+    def _show_shortcuts_help(self) -> None:
+        """Affiche l'aide des raccourcis clavier."""
+        shortcuts_text = """Raccourcis clavier disponibles :
+
+FICHIER :
+• Ctrl+N : Nouveau scan initial
+• Ctrl+R : Scan de comparaison  
+• Ctrl+E : Exporter les résultats
+• Ctrl+Q : Quitter l'application
+
+ÉDITION :
+• Ctrl+C : Copier la sélection
+• Ctrl+A : Sélectionner tout
+• Ctrl+L : Effacer les logs
+
+VUE :
+• Ctrl+D : Basculer "Dossiers seulement"
+• Ctrl+F : Aller au champ de recherche
+
+AUTRES :
+• F1 : Cette aide
+• Échap : Arrêter le scan en cours"""
+        
+        messagebox.showinfo("Raccourcis clavier", shortcuts_text)
+
+    def _show_about(self) -> None:
+        """Affiche les informations sur l'application."""
+        about_text = """AccessChk GUI v1.10
+
+Interface graphique pour l'outil AccessChk de Microsoft Sysinternals.
+
+Fonctionnalités :
+• Scan des permissions de fichiers et dossiers
+• Comparaison entre deux scans
+• Export des résultats
+• Filtrage avancé
+• Interface utilisateur intuitive
+
+Développé avec Python et Tkinter
+© 2025"""
+        
+        messagebox.showinfo("À propos", about_text)
 
     def _show_principal_help(self) -> None:
         """Affiche une boîte d'information détaillant l'utilisation du champ 'Principal'."""
@@ -628,6 +904,10 @@ class AccessChkGUI(tk.Tk):
             return
         
         principal = self.default_principal.strip() if self.default_principal else ""
+
+        # Sauvegarder les informations pour l'historique
+        self.current_scan_targets = targets
+        self.current_scan_principal = principal
 
         # Réinitialisation de l'état
         self.logs.clear()
@@ -811,6 +1091,19 @@ class AccessChkGUI(tk.Tk):
         self.running = False
         self.runner.is_running = False
         self.pbar.stop()
+        
+        # Sauvegarder dans l'historique
+        if hasattr(self, 'current_scan_targets') and hasattr(self, 'current_scan_principal'):
+            try:
+                self.history_manager.add_scan(
+                    self.scan_mode or "baseline",
+                    self.current_scan_targets,
+                    self.current_scan_principal or "auto",
+                    len(self.logs)
+                )
+            except Exception as e:
+                logger.warning(f"Impossible d'ajouter le scan à l'historique: {e}")
+        
         self.current_target = None
         self.current_principal = None
         
@@ -950,7 +1243,6 @@ class AccessChkGUI(tk.Tk):
 
     def _export_filtered(self) -> None:
         """Exporte les lignes actuellement visibles vers un fichier texte."""
-
         if not self.logs: messagebox.showinfo("Export", "Aucun log à exporter."); return
         path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files","*.txt"), ("All files","*.*")], initialfile=EXPORT_DEFAULT)
         if not path: return
@@ -961,6 +1253,140 @@ class AccessChkGUI(tk.Tk):
             messagebox.showinfo("Export", f"Export terminé : {path}")
         except Exception as ex:
             messagebox.showerror("Erreur export", str(ex))
+
+    def _export_csv(self) -> None:
+        """Exporte les logs au format CSV."""
+        if not self.logs:
+            messagebox.showinfo("Export CSV", "Aucun log à exporter.")
+            return
+        
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile="accesschk_export.csv"
+        )
+        if not path:
+            return
+        
+        try:
+            filtered_logs = list(self._filtered_logs())
+            self.export_manager.export_to_csv(filtered_logs, path)
+            messagebox.showinfo("Export CSV", f"Export CSV terminé : {path}")
+        except Exception as ex:
+            messagebox.showerror("Erreur export CSV", str(ex))
+
+    def _export_json(self) -> None:
+        """Exporte les logs au format JSON."""
+        if not self.logs:
+            messagebox.showinfo("Export JSON", "Aucun log à exporter.")
+            return
+        
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile="accesschk_export.json"
+        )
+        if not path:
+            return
+        
+        try:
+            filtered_logs = list(self._filtered_logs())
+            self.export_manager.export_to_json(filtered_logs, path)
+            messagebox.showinfo("Export JSON", f"Export JSON terminé : {path}")
+        except Exception as ex:
+            messagebox.showerror("Erreur export JSON", str(ex))
+
+    def _export_xml(self) -> None:
+        """Exporte les logs au format XML."""
+        if not self.logs:
+            messagebox.showinfo("Export XML", "Aucun log à exporter.")
+            return
+        
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xml",
+            filetypes=[("XML files", "*.xml"), ("All files", "*.*")],
+            initialfile="accesschk_export.xml"
+        )
+        if not path:
+            return
+        
+        try:
+            filtered_logs = list(self._filtered_logs())
+            self.export_manager.export_to_xml(filtered_logs, path)
+            messagebox.showinfo("Export XML", f"Export XML terminé : {path}")
+        except Exception as ex:
+            messagebox.showerror("Erreur export XML", str(ex))
+
+    def _show_history(self) -> None:
+        """Affiche l'historique des scans."""
+        history = self.history_manager.get_history()
+        
+        # Créer une nouvelle fenêtre pour l'historique
+        history_window = tk.Toplevel(self)
+        history_window.title("Historique des scans")
+        history_window.geometry("800x600")
+        
+        # Frame pour les boutons
+        btn_frame = ttk.Frame(history_window)
+        btn_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+        
+        ttk.Button(btn_frame, text="Effacer historique", 
+                  command=lambda: self._clear_history(history_window)).pack(side=tk.RIGHT)
+        
+        # Liste des scans
+        tree_frame = ttk.Frame(history_window)
+        tree_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        columns = ("timestamp", "type", "targets", "principal", "results")
+        tree = ttk.Treeview(tree_frame, columns=columns, show='headings')
+        
+        # Configuration des colonnes
+        tree.heading("timestamp", text="Date/Heure")
+        tree.heading("type", text="Type")
+        tree.heading("targets", text="Cibles")
+        tree.heading("principal", text="Principal")
+        tree.heading("results", text="Résultats")
+        
+        tree.column("timestamp", width=150)
+        tree.column("type", width=100)
+        tree.column("targets", width=300)
+        tree.column("principal", width=150)
+        tree.column("results", width=100)
+        
+        # Scrollbars
+        v_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        h_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        
+        # Placement
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Remplir avec les données
+        for entry in history:
+            try:
+                timestamp = datetime.fromisoformat(entry['timestamp']).strftime("%Y-%m-%d %H:%M:%S")
+                targets_str = "; ".join(entry['targets'][:2])  # Afficher max 2 cibles
+                if len(entry['targets']) > 2:
+                    targets_str += f" (+{len(entry['targets'])-2} autres)"
+                
+                tree.insert("", tk.END, values=(
+                    timestamp,
+                    entry['scan_type'],
+                    targets_str,
+                    entry['principal'],
+                    f"{entry['result_count']} lignes"
+                ))
+            except Exception as e:
+                logger.warning(f"Erreur lors de l'affichage de l'entrée d'historique: {e}")
+
+    def _clear_history(self, window: tk.Toplevel) -> None:
+        """Efface l'historique des scans."""
+        if messagebox.askyesno("Effacer historique", "Êtes-vous sûr de vouloir effacer tout l'historique ?"):
+            self.history_manager.clear_history()
+            window.destroy()
+            messagebox.showinfo("Historique", "Historique effacé avec succès.")
 
     # ---- misc ----
     def _persist_scan_results(self) -> None:
