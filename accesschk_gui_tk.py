@@ -371,11 +371,33 @@ SUPPRESSED_ERROR_PATTERNS = (
         r"la syntaxe du nom de fichier, de r[ée]pertoire ou de volume est incorrecte",
         re.I,
     ),
+    re.compile(r"has a non-canonical DACL", re.I),
+    re.compile(r"explicit deny after explicit allow", re.I),
+    re.compile(r"explicit allow after inherited allow", re.I),
+    re.compile(r"access denied", re.I),
+    re.compile(r"path not found", re.I),
+    re.compile(r"fichier introuvable", re.I),
+    re.compile(r"accès refusé", re.I),
+    re.compile(r"the system cannot find", re.I),
+    re.compile(r"le système ne peut pas localiser", re.I),
+    re.compile(r"error:", re.I),
+    re.compile(r"erreur:", re.I),
 )
 
 SUPPRESSED_ERROR_FOLDED_SNIPPETS = (
     "error getting security",
     "la syntaxe du nom de fichier, de repertoire ou de volume est incorrecte",
+    "has a non-canonical dacl",
+    "explicit deny after explicit allow", 
+    "explicit allow after inherited allow",
+    "access denied",
+    "path not found",
+    "fichier introuvable",
+    "acces refuse",
+    "the system cannot find",
+    "le systeme ne peut pas localiser",
+    "error:",
+    "erreur:",
 )
 
 
@@ -573,6 +595,10 @@ class AccessChkRunner:
                     s = decode_bytes_with_fallback(chunk).rstrip("\r\n")
                     
                     if not is_err and contains_cjk(s):
+                        continue
+                    
+                    # Filtrage précoce des erreurs fréquentes pour améliorer les performances
+                    if matches_suppressed_error(s):
                         continue
                     
                     if is_err and "Invalid account name" in s: 
