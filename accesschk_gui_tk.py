@@ -20,11 +20,50 @@ import ctypes
 import unicodedata
 import getpass
 import difflib
+import logging
+import shlex
+import time
+from pathlib import Path
+from typing import List, Optional, Dict, Any, Tuple, Union
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-EXPORT_DEFAULT = "accesschk_filtered_logs.txt"
-DIFF_EXPORT_DEFAULT = "accesschk_diff.txt"
+
+class AppConfig:
+    """Configuration centralisée de l'application."""
+    
+    # Performance
+    BATCH_SIZE = 100  # Réduit de 250 à 100 pour plus de responsivité
+    BATCH_TIMEOUT_MS = 50  # Timeout plus court
+    UI_UPDATE_INTERVAL_MS = 75  # Plus fréquent
+    MAX_DISPLAYED_LINES = 10000  # Limite pour éviter les ralentissements
+    
+    # UI
+    WINDOW_WIDTH = 1100
+    WINDOW_HEIGHT = 800
+    MIN_WIDTH = 880
+    MIN_HEIGHT = 620
+    
+    # Fichiers
+    EXPORT_DEFAULT = "accesschk_filtered_logs.txt"
+    DIFF_EXPORT_DEFAULT = "accesschk_diff.txt"
+    LOG_FILE = "accesschk_gui.log"
+    
+    # Sécurité
+    MAX_PATH_LENGTH = 260
+    ALLOWED_EXTENSIONS = {'.exe'}
+    DANGEROUS_CHARS = ['&', '|', ';', '$', '`', '(', ')', '{', '}', '[', ']', '<', '>']
+    
+    # AccessChk
+    PROGRESS_BAR_SPEED = 30  # Réduit de 60 pour moins de consommation CPU
+
+
+# Configuration des constantes (héritées pour compatibilité)
+EXPORT_DEFAULT = AppConfig.EXPORT_DEFAULT
+DIFF_EXPORT_DEFAULT = AppConfig.DIFF_EXPORT_DEFAULT
+MAX_PATH_LENGTH = AppConfig.MAX_PATH_LENGTH
+ALLOWED_EXTENSIONS = AppConfig.ALLOWED_EXTENSIONS
+DANGEROUS_CHARS = AppConfig.DANGEROUS_CHARS
 
 
 def is_running_elevated() -> bool:
@@ -41,20 +80,142 @@ def is_running_elevated() -> bool:
         return False
 
 
+def validate_executable_path(path: str) -> Tuple[bool, str]:
+    """Validate that the provided path is a safe executable file.
+    
+    Returns:
+        Tuple[bool, str]: (is_valid, error_message)
+    """
+    if not path or not isinstance(path, str):
+        return False, "Le chemin est vide ou invalide"
+    
+    # Normalize and check path length
+    try:
+        normalized_path = os.path.normpath(path.strip())
+        if len(normalized_path) > MAX_PATH_LENGTH:
+            return False, f"Le chemin est trop long (max {MAX_PATH_LENGTH} caractères)"
+    except (OSError, ValueError) as e:
+        return False, f"Chemin invalide: {str(e)}"
+    
+    # Check for dangerous characters
+    if any(char in normalized_path for char in DANGEROUS_CHARS):
+        return False, "Le chemin contient des caractères dangereux"
+    
+    # Check if file exists
+    if not os.path.isfile(normalized_path):
+        return False, "Le fichier n'existe pas"
+    
+    # Check file extension
+    file_ext = Path(normalized_path).suffix.lower()
+    if file_ext not in ALLOWED_EXTENSIONS:
+        return False, f"Extension de fichier non autorisée: {file_ext}"
+    
+    # Check if it's actually accesschk.exe
+    filename = Path(normalized_path).name.lower()
+    if filename != "accesschk.exe":
+        return False, "Le fichier doit être accesschk.exe"
+    
+    return True, ""
+
+
+def validate_target_paths(paths_str: str) -> Tuple[bool, str, List[str]]:
+    """Validate target paths for scanning.
+    
+    Returns:
+        Tuple[bool, str, List[str]]: (is_valid, error_message, validated_paths)
+    """
+    if not paths_str or not isinstance(paths_str, str):
+        return False, "Aucun chemin spécifié", []
+    
+    raw_paths = [p.strip().strip('"') for p in paths_str.split(";") if p.strip()]
+    if not raw_paths:
+        return False, "Aucun chemin valide trouvé", []
+    
+    validated_paths = []
+    for path in raw_paths:
+        # Check for dangerous characters
+        if any(char in path for char in DANGEROUS_CHARS):
+            return False, f"Chemin dangereux détecté: {path}", []
+        
+        # Normalize path
+        try:
+            normalized = os.path.normpath(path)
+            if len(normalized) > MAX_PATH_LENGTH:
+                return False, f"Chemin trop long: {path}", []
+        except (OSError, ValueError):
+            return False, f"Chemin invalide: {path}", []
+        
+        # Check if path exists (warning only, not blocking)
+        if not os.path.exists(normalized):
+            logging.warning(f"Chemin non trouvé (sera ignoré par accesschk): {normalized}")
+        
+        validated_paths.append(normalized)
+    
+    return True, "", validated_paths
+
+
+def sanitize_command_args(args: List[str]) -> List[str]:
+    """Sanitize command arguments to prevent injection attacks.
+    
+    Args:
+        args: List of command arguments
+    
+    Returns:
+        List[str]: Sanitized arguments
+    """
+    sanitized = []
+    for arg in args:
+        if not isinstance(arg, str):
+            continue
+        
+        # Remove dangerous characters and validate
+        if any(char in arg for char in DANGEROUS_CHARS):
+            # For paths, we already validated them above
+            # For other args, we can safely quote them
+            if os.path.exists(arg) or arg.startswith('-') or arg in ['accepteula', 'nobanner']:
+                sanitized.append(shlex.quote(arg))
+            else:
+                logging.warning(f"Argument potentiellement dangereux ignoré: {arg}")
+        else:
+            sanitized.append(arg)
+    
+    return sanitized
+
+
+# Configuration du logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('accesschk_gui.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+
 def current_user_principal() -> str:
     """Best-effort resolution of the current user in DOMAIN\\User format."""
     try:
         user_env = os.environ.get("USERNAME")
-    except Exception:
+    except (KeyError, OSError) as e:
+        logger.warning(f"Impossible de récupérer USERNAME depuis l'environnement: {e}")
         user_env = None
+    
     try:
         user = user_env or getpass.getuser()
-    except Exception:
+    except (OSError, KeyError, ImportError) as e:
+        logger.warning(f"Impossible de récupérer l'utilisateur courant: {e}")
         user = user_env or ""
+    
     if os.name == "nt":
-        domain = os.environ.get("USERDOMAIN")
-        if domain and user:
-            return f"{domain}\\{user}"
+        try:
+            domain = os.environ.get("USERDOMAIN")
+            if domain and user:
+                return f"{domain}\\{user}"
+        except (KeyError, OSError) as e:
+            logger.warning(f"Impossible de récupérer le domaine: {e}")
+    
     return user
 
 # Détecte les lignes RW (format accesschk)
@@ -79,13 +240,18 @@ SUPPRESSED_ERROR_FOLDED_SNIPPETS = (
 
 def _normalize_for_error_matching(text: str) -> str:
     """Return a lower-cased ASCII approximation of ``text`` for robust matching."""
-
     try:
         normalized = unicodedata.normalize("NFKD", text)
-    except Exception:
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Erreur de normalisation Unicode: {e}")
         normalized = text
-    stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    return stripped.casefold()
+    
+    try:
+        stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+        return stripped.casefold()
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Erreur lors du traitement des caractères: {e}")
+        return text.lower()
 
 
 def matches_suppressed_error(text: str) -> bool:
@@ -98,11 +264,17 @@ def matches_suppressed_error(text: str) -> bool:
 
 # Extrait le premier chemin de type Windows/UNC
 PATH_EXTRACT = re.compile(r"(?:[A-Za-z]:\\|\\\\[^\\]+\\)[^\r\n]*")
-def extract_first_path(s: str):
+def extract_first_path(s: str) -> Optional[str]:
     """Retourne la première occurrence de chemin Windows/UNC trouvée dans ``s``."""
-
-    m = PATH_EXTRACT.search(s)
-    return m.group(0).strip().rstrip('"') if m else None
+    if not s or not isinstance(s, str):
+        return None
+    
+    try:
+        m = PATH_EXTRACT.search(s)
+        return m.group(0).strip().rstrip('"') if m else None
+    except (AttributeError, IndexError) as e:
+        logger.debug(f"Erreur lors de l'extraction du chemin: {e}")
+        return None
 
 ASCII_ALNUM = re.compile(r"[A-Za-z0-9]")
 CJK_CHARS = re.compile(r"[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uAC00-\uD7AF]")
@@ -121,54 +293,236 @@ def bundled_accesschk_path() -> str:
 
 def decode_bytes_with_fallback(b: bytes) -> str:
     """Décode une chaîne d'octets en essayant plusieurs encodages classiques."""
-
+    if not isinstance(b, bytes):
+        logger.warning(f"Type inattendu pour le décodage: {type(b)}")
+        return str(b)
+    
     for enc in ("utf-8", "utf-16", "cp850", "cp437", "cp1252", "latin-1"):
         try:
             return b.decode(enc, errors="strict")
-        except Exception:
+        except (UnicodeDecodeError, LookupError, ValueError) as e:
+            logger.debug(f"Échec de décodage avec {enc}: {e}")
             continue
-    return b.decode("latin-1", errors="replace")
+    
+    # Fallback final
+    try:
+        return b.decode("latin-1", errors="replace")
+    except (UnicodeDecodeError, LookupError) as e:
+        logger.error(f"Échec du décodage de fallback: {e}")
+        return str(b, errors="replace")
 
 def default_targets_string() -> str:
     """Valeur par défaut affichée dans le champ des cibles."""
-
     if os.name == "nt":
         return "C:\\"
     return os.path.sep
+
+
+class AccessChkRunner:
+    """Classe responsable de l'exécution des scans AccessChk."""
+    
+    def __init__(self, config: AppConfig, queue_handler: queue.Queue):
+        self.config = config
+        self.queue = queue_handler
+        self.current_process = None
+        self.is_running = False
+    
+    def start_scan(self, accesschk_path: str, targets: List[str], principal: str) -> None:
+        """Démarre un scan AccessChk dans un thread séparé."""
+        if self.is_running:
+            raise RuntimeError("Un scan est déjà en cours")
+        
+        self.is_running = True
+        thread = threading.Thread(
+            target=self._run_scan,
+            args=(accesschk_path, targets, principal),
+            daemon=True,
+            name="AccessChkRunner"
+        )
+        thread.start()
+    
+    def stop_scan(self) -> None:
+        """Arrête le scan en cours."""
+        try:
+            if self.current_process and self.current_process.poll() is None:
+                self.current_process.kill()
+                logger.info("Scan arrêté par l'utilisateur")
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.warning(f"Erreur lors de l'arrêt du scan: {e}")
+        finally:
+            self.is_running = False
+            self.current_process = None
+    
+    def _run_scan(self, accesschk_path: str, targets: List[str], principal: str) -> None:
+        """Logique principale d'exécution du scan."""
+        try:
+            principals = [principal] if principal else ["Utilisateurs", "Users", r"BUILTIN\Users", "S-1-5-32-545"]
+            last_rc = 0
+            
+            for target in targets:
+                if not self.is_running:  # Check pour arrêt précoce
+                    break
+                    
+                for idx, who in enumerate(principals):
+                    if not who or not self.is_running: 
+                        continue
+                    
+                    # Construction sécurisée des arguments
+                    base_args = [accesschk_path, "-accepteula", "-nobanner", who, "-w", "-s", target]
+                    args = sanitize_command_args(base_args)
+                    
+                    self.queue.put({"_status": f"Scan de {target} — {who or '(auto)'}"})
+                    
+                    try:
+                        self.current_process = self._create_process(args)
+                        last_rc = self._process_output(self.current_process, who, principals, idx)
+                        
+                        if last_rc != -2:  # -2 = invalid account, continue with next
+                            break
+                            
+                    except (FileNotFoundError, OSError, subprocess.SubprocessError) as e:
+                        error_msg = f"[ERREUR] Impossible de lancer accesschk.exe: {e}"
+                        logger.error(error_msg)
+                        self.queue.put({"line": error_msg, "write": False, "err": True})
+                        self.queue.put({"_finished": True, "returncode": -1})
+                        return
+            
+            self.queue.put({"_finished": True, "returncode": last_rc})
+            
+        except Exception as ex:
+            error_msg = f"[EXCEPTION] Erreur inattendue dans le scan: {ex}"
+            logger.exception(error_msg)
+            self.queue.put({"line": error_msg, "write": False, "err": True})
+            self.queue.put({"_finished": True, "returncode": -1})
+        finally:
+            self.is_running = False
+            self.current_process = None
+    
+    def _create_process(self, args: List[str]) -> subprocess.Popen:
+        """Crée un processus subprocess pour AccessChk."""
+        startupinfo = None
+        creationflags = 0
+        
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        return subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+        )
+    
+    def _process_output(self, proc: subprocess.Popen, who: str, principals: List[str], idx: int) -> int:
+        """Traite la sortie du processus AccessChk."""
+        invalid = False
+        
+        def reader(stream, is_err=False):
+            """Lit un flux AccessChk et pousse les lignes dans la file d'attente."""
+            nonlocal invalid
+            try:
+                while True:
+                    chunk = stream.readline()
+                    if not chunk: 
+                        break
+                    
+                    s = decode_bytes_with_fallback(chunk).rstrip("\r\n")
+                    
+                    if not is_err and contains_cjk(s):
+                        continue
+                    
+                    if is_err and "Invalid account name" in s: 
+                        invalid = True
+                    
+                    has_write = bool(WRITE_REGEX.search(s)) if not is_err else False
+                    self.queue.put({"line": s, "write": has_write, "err": is_err})
+            except (UnicodeError, IOError) as e:
+                logger.warning(f"Erreur lors de la lecture du flux: {e}")
+        
+        # Threads de lecture des flux
+        t1 = threading.Thread(target=reader, args=(proc.stdout, False), daemon=True, name="StdoutReader")
+        t2 = threading.Thread(target=reader, args=(proc.stderr, True), daemon=True, name="StderrReader")
+        
+        t1.start()
+        t2.start()
+        
+        try:
+            proc.wait()
+        except KeyboardInterrupt:
+            logger.info("Interruption du scan par l'utilisateur")
+            proc.kill()
+            return -1
+        
+        # Attente des threads de lecture
+        t1.join(timeout=2)
+        t2.join(timeout=2)
+        
+        # Gestion des comptes invalides
+        if invalid and idx < len(principals) - 1:
+            info_msg = f"[INFO] '{who}' invalide, nouvel essai avec '{principals[idx+1]}'..."
+            logger.info(info_msg)
+            self.queue.put({"line": info_msg, "write": False, "err": True})
+            return -2  # Code spécial pour compte invalide
+        
+        return proc.returncode
+
 
 class AccessChkGUI(tk.Tk):
     """Fenêtre principale gérant l'intégralité des interactions utilisateur."""
 
     def __init__(self):
         """Initialise l'interface et les structures de stockage en mémoire."""
-
         super().__init__()
         self.title("AccessChk GUI v1.10")
-        self.geometry("1100x800"); self.minsize(880, 620)
-        self.logs=[]; self.q=queue.Queue(); self.proc=None; self.running=False
-        self.BATCH_MAX=250; self._line_count=0; self._write_count=0; self._isdir_cache={}
+        self.geometry(f"{AppConfig.WINDOW_WIDTH}x{AppConfig.WINDOW_HEIGHT}")
+        self.minsize(AppConfig.MIN_WIDTH, AppConfig.MIN_HEIGHT)
+        
+        # Configuration et composants
+        self.config = AppConfig()
+        self.q = queue.Queue()
+        self.runner = AccessChkRunner(self.config, self.q)
+        
+        # État de l'application
+        self.logs = []
+        self.running = False
+        
+        # Métriques et cache
+        self._line_count = 0
+        self._write_count = 0
+        self._isdir_cache = {}
         self._suppressed_errors = 0
         self._pending_path = None
+        self._ui_buffer = []  # Buffer pour optimiser les mises à jour UI
+        
+        # État du scan
         self.current_target = None
         self.current_principal = None
         self.default_principal = current_user_principal()
+        self.scan_mode = None
+        
+        # Chemins de fichiers
         base_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
         self.storage_dir = base_dir
         self.base_scan_path = os.path.join(base_dir, "scan_initial.txt")
         self.compare_scan_path = os.path.join(base_dir, "scan_comparatif.txt")
         self.diff_output_path = os.path.join(base_dir, "scan_diff.txt")
-        self.scan_mode = None
+        
+        # Nettoyage des fichiers temporaires
         for leftover in (self.compare_scan_path, self.diff_output_path):
             try:
                 if os.path.isfile(leftover):
                     os.remove(leftover)
-            except Exception:
-                pass
+            except (OSError, IOError) as e:
+                logger.warning(f"Impossible de supprimer {leftover}: {e}")
+        
         self._build_ui()
         self.after(0, self._enforce_standard_user)
-        self.after(100, self._poll_queue)
+        self.after(self.config.UI_UPDATE_INTERVAL_MS, self._poll_queue)
 
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         """Construit tous les widgets de la fenêtre principale."""
 
         menubar = tk.Menu(self)
@@ -228,7 +582,7 @@ class AccessChkGUI(tk.Tk):
         self.txt.bind("<Button-3>", self._show_context_menu)
         self._update_compare_state()
 
-    def _show_principal_help(self):
+    def _show_principal_help(self) -> None:
         """Affiche une boîte d'information détaillant l'utilisation du champ 'Principal'."""
 
         messagebox.showinfo("Aide — Principal",
@@ -248,142 +602,113 @@ class AccessChkGUI(tk.Tk):
         if p: self.entry_target.delete(0, tk.END); self.entry_target.insert(0, os.path.normpath(p))
 
     # ---- core ----
-    def _on_scan(self, mode="baseline"):
+    def _on_scan(self, mode: str = "baseline"):
         """Démarre un scan AccessChk dans un thread en fonction du ``mode`` sélectionné."""
-
-        if self.proc is not None and self.proc.poll() is None:
-            messagebox.showwarning("Scan en cours", "Un scan est déjà en cours."); return
+        if self.runner.is_running:
+            messagebox.showwarning("Scan en cours", "Un scan est déjà en cours.")
+            return
+        
+        # Validation sécurisée de l'exécutable
         accesschk = self.entry_accesschk.get().strip()
-        if not accesschk or not os.path.isfile(accesschk):
-            messagebox.showerror("Erreur", "accesschk.exe introuvable dans le même dossier. Sélectionnez-le."); return
+        is_valid, error_msg = validate_executable_path(accesschk)
+        if not is_valid:
+            messagebox.showerror("Erreur", f"Erreur avec accesschk.exe: {error_msg}")
+            return
+        
+        # Vérification du mode comparaison
         if mode == "compare" and not os.path.isfile(self.base_scan_path):
-            messagebox.showerror("Scan comparaison", "Aucun scan initial trouvé. Lancez d'abord un scan initial."); return
+            messagebox.showerror("Scan comparaison", "Aucun scan initial trouvé. Lancez d'abord un scan initial.")
+            return
+        
+        # Validation des cibles
         raw_targets = self.entry_target.get().strip() or default_targets_string()
-        targets = [t.strip().strip('"') for t in raw_targets.split(";") if t.strip()]
+        is_valid, error_msg, targets = validate_target_paths(raw_targets)
+        if not is_valid:
+            messagebox.showerror("Erreur", f"Erreur avec les cibles: {error_msg}")
+            return
+        
         principal = self.default_principal.strip() if self.default_principal else ""
 
-        self.logs.clear(); self._line_count=0; self._write_count=0; self._isdir_cache.clear()
+        # Réinitialisation de l'état
+        self.logs.clear()
+        self._line_count = 0
+        self._write_count = 0
+        self._isdir_cache.clear()
         self._suppressed_errors = 0
         self._pending_path = None
-        self.txt.configure(state=tk.NORMAL); self.txt.delete("1.0", tk.END); self.txt.configure(state=tk.DISABLED)
+        
+        # Mise à jour de l'UI
+        self.txt.configure(state=tk.NORMAL)
+        self.txt.delete("1.0", tk.END)
+        self.txt.configure(state=tk.DISABLED)
+        
         principal_label = principal or "(introuvable)"
         self.status_var.set(f"Préparation du scan : {principal_label} sur {len(targets)} cible(s). 0 lignes (0 RW)")
-        self.running=True
+        
+        # État du scan
+        self.running = True
         self.current_target = None
         self.current_principal = None
         self.scan_mode = mode
-        self.btn_scan_base.configure(state=tk.DISABLED); self.btn_scan_compare.configure(state=tk.DISABLED)
-        self.btn_stop.configure(state=tk.NORMAL); self.pbar.start(60)
+        
+        # État des boutons
+        self.btn_scan_base.configure(state=tk.DISABLED)
+        self.btn_scan_compare.configure(state=tk.DISABLED)
+        self.btn_stop.configure(state=tk.NORMAL)
+        self.pbar.start(self.config.PROGRESS_BAR_SPEED)
 
-        threading.Thread(target=self._run_accesschk_thread, args=(accesschk, targets, principal), daemon=True).start()
-
-    def _on_stop(self):
-        """Arrête le scan en cours (si un processus est actif)."""
-
+        # Lancement du scan via le runner
         try:
-            if self.proc and self.proc.poll() is None:
-                self.proc.kill()
-                self.status_var.set(f"Arrêt manuel. {self._line_count} lignes ({self._write_count} RW).")
-        except Exception:
-            pass
+            self.runner.start_scan(accesschk, targets, principal)
+        except RuntimeError as e:
+            messagebox.showerror("Erreur", str(e))
+            self._on_stop()
+
+    def _on_stop(self) -> None:
+        """Arrête le scan en cours (si un processus est actif)."""
+        try:
+            self.runner.stop_scan()
+            self.status_var.set(f"Arrêt manuel. {self._line_count} lignes ({self._write_count} RW).")
+        except Exception as e:
+            logger.warning(f"Erreur lors de l'arrêt: {e}")
         finally:
             self.running = False
             self.pbar.stop()
             self.scan_mode = None
             self._update_compare_state()
             self.btn_stop.configure(state=tk.DISABLED)
-            self.proc = None
             self.current_target = None
             self.current_principal = None
 
-    def _run_accesschk_thread(self, accesschk, targets, principal):
-        """Thread lançant AccessChk et réinjectant les lignes dans la file d'attente UI."""
-
-        try:
-            principals = [principal] if principal else ["Utilisateurs", "Users", r"BUILTIN\Users", "S-1-5-32-545"]
-            last_rc = 0
-            for target in targets:
-                for idx, who in enumerate(principals):
-                    if not who: continue
-                    # RW + récursif + sans bandeau
-                    args = [accesschk, "-accepteula", "-nobanner", who, "-w", "-s", target]
-                    startupinfo = None
-                    creationflags = 0
-                    if os.name == "nt":
-                        startupinfo = subprocess.STARTUPINFO()
-                        startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
-                        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-                    self.q.put({"_status": f"Scan de {target} — {who or '(auto)'}"})
-                    try:
-                        proc = subprocess.Popen(
-                            args,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            startupinfo=startupinfo,
-                            creationflags=creationflags,
-                        )
-                    except FileNotFoundError:
-                        self.q.put({"line": "[ERREUR] accesschk.exe introuvable au lancement.", "write": False, "err": True})
-                        self.q.put({"_finished": True, "returncode": -1})
-                        return
-                    except Exception as ex:
-                        self.q.put({"line": f"[ERREUR] Impossible de lancer accesschk.exe : {ex}", "write": False, "err": True})
-                        self.q.put({"_finished": True, "returncode": -1})
-                        return
-                    self.proc = proc
-                    self.current_target = target
-                    self.current_principal = who
-
-                    invalid = False
-                    def reader(stream, is_err=False):
-                        """Lit un flux AccessChk et pousse les lignes dans la file d'attente."""
-
-                        nonlocal invalid
-                        while True:
-                            chunk = stream.readline()
-                            if not chunk: break
-                            s = decode_bytes_with_fallback(chunk).rstrip("\r\n")
-                            # Certaines versions d'AccessChk retournent ponctuellement des
-                            # caractères « CJK » parasites : on les ignore pour garder les
-                            # journaux lisibles.
-                            if not is_err and contains_cjk(s):
-                                continue
-                            if is_err and "Invalid account name" in s: invalid = True
-                            has_write = bool(WRITE_REGEX.search(s)) if not is_err else False
-                            self.q.put({"line": s, "write": has_write, "err": is_err})
-                    t1 = threading.Thread(target=reader, args=(proc.stdout, False), daemon=True)
-                    t2 = threading.Thread(target=reader, args=(proc.stderr, True), daemon=True)
-                    t1.start(); t2.start(); proc.wait(); t1.join(timeout=1); t2.join(timeout=1)
-                    last_rc = proc.returncode
-                    if invalid and idx < len(principals)-1:
-                        self.q.put({"line": f"[INFO] '{who}' invalide, nouvel essai avec '{principals[idx+1]}'...", "write": False, "err": True}); continue
-                    else: break
-            self.q.put({"_finished": True, "returncode": last_rc})
-        except Exception as ex:
-            self.q.put({"line": f"[EXCEPTION] {ex}", "write": False, "err": True})
-            self.q.put({"_finished": True, "returncode": -1})
-
-    # ---- queue / UI ----
-    def _poll_queue(self):
+    def _poll_queue(self) -> None:
         """Récupère les éléments de la file d'attente et met à jour l'affichage."""
-
-        processed=0; buf_normal=[]; buf_write=[]; buf_err=[]
-        while processed < self.BATCH_MAX:
-            try: item = self.q.get_nowait()
-            except queue.Empty: break
+        start_time = time.time()
+        processed = 0
+        buf_normal, buf_write, buf_err = [], [], []
+        
+        # Traitement par batch avec limite de temps
+        while processed < self.config.BATCH_SIZE and (time.time() - start_time) < (self.config.BATCH_TIMEOUT_MS / 1000):
+            try: 
+                item = self.q.get_nowait()
+            except queue.Empty: 
+                break
+            
             if "_status" in item:
                 self.status_var.set(item["_status"])
                 continue
+                
             if item.get("_finished"):
-                rc=item.get("returncode")
+                rc = item.get("returncode")
                 self._finish_scan(rc)
                 continue
-            text=item["line"]
+            
+            text = item["line"]
             if not text.strip():
                 self._pending_path = None
                 processed += 1
                 continue
+            
+            # Traitement optimisé des lignes
             if not item["err"]:
                 path = extract_first_path(text)
                 if not item["write"]:
@@ -406,26 +731,48 @@ class AccessChkGUI(tk.Tk):
                     item = dict(item)
                     item["line"] = text
                 self._pending_path = None
+            
+            # Gestion des erreurs supprimées
             if matches_suppressed_error(text):
                 self._suppressed_errors += 1
                 self._suppress_error_sequence(buf_normal, buf_write, buf_err)
                 processed += 1
                 continue
-            self.logs.append(item); self._line_count += 1
+            
+            # Limitation du nombre de lignes pour éviter les ralentissements
+            if len(self.logs) >= self.config.MAX_DISPLAYED_LINES:
+                # Supprime les anciennes lignes (FIFO)
+                removed_items = self.logs[:self.config.BATCH_SIZE]
+                self.logs = self.logs[self.config.BATCH_SIZE:]
+                self._line_count = len(self.logs)
+                self._write_count = sum(1 for item in self.logs if item["write"] and not item["err"])
+                
+                # Met à jour l'affichage
+                self.txt.configure(state=tk.NORMAL)
+                self.txt.delete("1.0", f"{self.config.BATCH_SIZE}.0")
+                self.txt.configure(state=tk.DISABLED)
+            
+            # Ajout de la ligne
+            self.logs.append(item)
+            self._line_count += 1
             if item["write"] and not item["err"]:
                 self._write_count += 1
-            if item["err"]: buf_err.append(text)
-            elif item["write"]: buf_write.append(text)
-            else: buf_normal.append(text)
+            
+            # Buffering pour l'affichage
+            if item["err"]: 
+                buf_err.append(text)
+            elif item["write"]: 
+                buf_write.append(text)
+            else: 
+                buf_normal.append(text)
+            
             processed += 1
 
+        # Mise à jour de l'affichage par batch
         if buf_normal or buf_write or buf_err:
-            self.txt.configure(state=tk.NORMAL)
-            if buf_normal: self.txt.insert(tk.END, "\n".join(buf_normal) + "\n", "normal")
-            if buf_write:  self.txt.insert(tk.END, "\n".join(buf_write) + "\n", "write")
-            if buf_err:    self.txt.insert(tk.END, "\n".join(buf_err) + "\n", "err")
-            self.txt.see(tk.END); self.txt.configure(state=tk.DISABLED)
+            self._update_display_batch(buf_normal, buf_write, buf_err)
 
+        # Mise à jour du statut
         if self.running:
             target = self.current_target or "(en attente)"
             principal = self.current_principal or "(auto)"
@@ -433,23 +780,51 @@ class AccessChkGUI(tk.Tk):
             self.status_var.set(
                 f"Scan en cours — {principal} @ {target} : {self._line_count} lignes ({self._write_count} RW{suppressed})"
             )
-        self.after(100, self._poll_queue)
+        
+        # Planifier la prochaine vérification
+        self.after(self.config.UI_UPDATE_INTERVAL_MS, self._poll_queue)
+    
+    def _update_display_batch(self, buf_normal: List[str], buf_write: List[str], buf_err: List[str]):
+        """Met à jour l'affichage par batch pour de meilleures performances."""
+        self.txt.configure(state=tk.NORMAL)
+        
+        if buf_normal: 
+            self.txt.insert(tk.END, "\n".join(buf_normal) + "\n", "normal")
+        if buf_write:  
+            self.txt.insert(tk.END, "\n".join(buf_write) + "\n", "write")
+        if buf_err:    
+            self.txt.insert(tk.END, "\n".join(buf_err) + "\n", "err")
+        
+        # Défilement intelligent - seulement si on est près du bas
+        try:
+            visible_end = float(self.txt.index("@0,%d" % self.txt.winfo_height()))
+            total_lines = float(self.txt.index(tk.END))
+            if (total_lines - visible_end) < 5:  # Si on est dans les 5 dernières lignes visibles
+                self.txt.see(tk.END)
+        except (tk.TclError, ValueError):
+            pass  # En cas d'erreur, on ignore le défilement
+        
+        self.txt.configure(state=tk.DISABLED)
 
     def _finish_scan(self, returncode: int):
         """Finalise un scan : mise à jour du statut et sauvegarde éventuelle."""
-
-        self.proc = None
         self.running = False
+        self.runner.is_running = False
         self.pbar.stop()
         self.current_target = None
         self.current_principal = None
+        
         suppressed = f", {self._suppressed_errors} erreurs ignorées" if self._suppressed_errors else ""
         self.status_var.set(
             f"Terminé (rc={returncode}). {len(self.logs)} lignes ({self._write_count} RW{suppressed})."
         )
         self.btn_stop.configure(state=tk.DISABLED)
+        
         try:
             self._persist_scan_results()
+        except Exception as e:
+            logger.error(f"Erreur lors de la sauvegarde: {e}")
+            messagebox.showerror("Erreur", f"Impossible de sauvegarder les résultats: {e}")
         finally:
             self._update_compare_state()
 
@@ -500,15 +875,23 @@ class AccessChkGUI(tk.Tk):
     # ---- filtering / export ----
     def _is_dir_cached(self, path: str) -> bool:
         """Teste si ``path`` est un dossier en mémorisant le résultat."""
-
+        if not path or not isinstance(path, str):
+            return False
+            
         key = path.lower()
-        if key in self._isdir_cache: return self._isdir_cache[key]
-        try: isd = os.path.isdir(path)
-        except Exception: isd = False
+        if key in self._isdir_cache: 
+            return self._isdir_cache[key]
+        
+        try: 
+            isd = os.path.isdir(path)
+        except (OSError, ValueError, TypeError) as e:
+            logger.debug(f"Erreur lors de la vérification du dossier {path}: {e}")
+            isd = False
+        
         self._isdir_cache[key] = isd
         return isd
 
-    def _render_logs(self):
+    def _render_logs(self) -> None:
         """Ré-affiche le contenu filtré des journaux dans la zone de texte."""
 
         self.txt.configure(state=tk.NORMAL); self.txt.delete("1.0", tk.END)
@@ -565,7 +948,7 @@ class AccessChkGUI(tk.Tk):
             filtered.append(line)
         return filtered
 
-    def _export_filtered(self):
+    def _export_filtered(self) -> None:
         """Exporte les lignes actuellement visibles vers un fichier texte."""
 
         if not self.logs: messagebox.showinfo("Export", "Aucun log à exporter."); return
@@ -580,7 +963,7 @@ class AccessChkGUI(tk.Tk):
             messagebox.showerror("Erreur export", str(ex))
 
     # ---- misc ----
-    def _persist_scan_results(self):
+    def _persist_scan_results(self) -> None:
         """Sauvegarde les résultats d'un scan dans un fichier temporaire."""
 
         mode = self.scan_mode
@@ -689,7 +1072,7 @@ class AccessChkGUI(tk.Tk):
         xscroll.pack(side=tk.BOTTOM, fill=tk.X)
         txt.configure(xscrollcommand=xscroll.set)
 
-    def _update_compare_state(self):
+    def _update_compare_state(self) -> None:
         """Active/désactive les boutons de scan selon l'état courant."""
 
         if self.running:
@@ -728,12 +1111,13 @@ class AccessChkGUI(tk.Tk):
             messagebox.showerror("Droits élevés détectés",
                                  "Cette application doit être lancée avec un utilisateur standard.")
             self.after(100, self.on_close)
-    def on_close(self):
+    def on_close(self) -> None:
         """Ferme proprement la fenêtre principale en stoppant les processus éventuels."""
-
         try:
-            if self.proc and self.proc.poll() is None: self.proc.kill()
-        except Exception: pass
+            self.runner.stop_scan()
+        except Exception as e:
+            logger.warning(f"Erreur lors de l'arrêt du runner: {e}")
+        
         self._cleanup_scan_files()
         self.destroy()
 
