@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, threading, queue, subprocess, re, ctypes, getpass, tkinter as tk
+import os, sys, threading, queue, subprocess, re, ctypes, getpass, difflib, tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 EXPORT_DEFAULT = "accesschk_filtered_logs.txt"
@@ -61,19 +61,9 @@ def decode_bytes_with_fallback(b: bytes) -> str:
     return b.decode("latin-1", errors="replace")
 
 def default_targets_string() -> str:
-    paths = []
-    pf = os.environ.get("ProgramFiles")
-    pf86 = os.environ.get("ProgramFiles(x86)")
-    if pf and os.path.isdir(pf): paths.append(os.path.normpath(pf))
-    if pf86 and os.path.isdir(pf86) and (pf86.lower() != (pf or "").lower()):
-        paths.append(os.path.normpath(pf86))
-    if not paths:
-        paths = [r"C:\Program Files", r"C:\Program Files (x86)"]
-    seen, uniq = set(), []
-    for p in paths:
-        if p.lower() not in seen:
-            seen.add(p.lower()); uniq.append(p)
-    return ";".join(uniq)
+    if os.name == "nt":
+        return "C:\\"
+    return os.path.sep
 
 class AccessChkGUI(tk.Tk):
     def __init__(self):
@@ -85,6 +75,18 @@ class AccessChkGUI(tk.Tk):
         self.current_target = None
         self.current_principal = None
         self.default_principal = current_user_principal()
+        base_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
+        self.storage_dir = base_dir
+        self.base_scan_path = os.path.join(base_dir, "scan_initial.txt")
+        self.compare_scan_path = os.path.join(base_dir, "scan_comparatif.txt")
+        self.diff_output_path = os.path.join(base_dir, "scan_diff.txt")
+        self.scan_mode = None
+        for leftover in (self.compare_scan_path, self.diff_output_path):
+            try:
+                if os.path.isfile(leftover):
+                    os.remove(leftover)
+            except Exception:
+                pass
         self._build_ui()
         self.after(0, self._enforce_standard_user)
         self.after(100, self._poll_queue)
@@ -109,8 +111,12 @@ class AccessChkGUI(tk.Tk):
         self.var_principal = tk.StringVar(value=self.default_principal or "(introuvable)")
         ttk.Label(frm_top, textvariable=self.var_principal).grid(row=1, column=1, sticky=tk.W, pady=(6,0))
         btns = ttk.Frame(frm_top); btns.grid(row=1, column=2, padx=6, pady=(6,0))
-        self.btn_scan = ttk.Button(btns, text="Scan", command=self._on_scan); self.btn_scan.pack(side=tk.LEFT)
-        self.btn_stop = ttk.Button(btns, text="Stop", command=self._on_stop, state=tk.DISABLED); self.btn_stop.pack(side=tk.LEFT, padx=(6,0))
+        self.btn_scan_base = ttk.Button(btns, text="Scan initial", command=lambda: self._on_scan("baseline"))
+        self.btn_scan_base.pack(side=tk.LEFT)
+        self.btn_scan_compare = ttk.Button(btns, text="Scan comparaison", command=lambda: self._on_scan("compare"))
+        self.btn_scan_compare.pack(side=tk.LEFT, padx=(6,0))
+        self.btn_stop = ttk.Button(btns, text="Stop", command=self._on_stop, state=tk.DISABLED)
+        self.btn_stop.pack(side=tk.LEFT, padx=(6,0))
 
         ttk.Label(frm_top, text="Cibles (séparer par ;) :").grid(row=2, column=0, sticky=tk.W, padx=4, pady=(6,0))
         self.entry_target = ttk.Entry(frm_top, width=70); self.entry_target.grid(row=2, column=1, sticky=tk.W, pady=(6,0))
@@ -141,6 +147,7 @@ class AccessChkGUI(tk.Tk):
 
         self.menu = tk.Menu(self, tearoff=0); self.menu.add_command(label="Copier", command=self._copy_selection)
         self.txt.bind("<Button-3>", self._show_context_menu)
+        self._update_compare_state()
 
     def _show_principal_help(self):
         messagebox.showinfo("Aide — Principal",
@@ -156,12 +163,14 @@ class AccessChkGUI(tk.Tk):
         if p: self.entry_target.delete(0, tk.END); self.entry_target.insert(0, os.path.normpath(p))
 
     # ---- core ----
-    def _on_scan(self):
+    def _on_scan(self, mode="baseline"):
         if self.proc is not None and self.proc.poll() is None:
             messagebox.showwarning("Scan en cours", "Un scan est déjà en cours."); return
         accesschk = self.entry_accesschk.get().strip()
         if not accesschk or not os.path.isfile(accesschk):
             messagebox.showerror("Erreur", "accesschk.exe introuvable dans le même dossier. Sélectionnez-le."); return
+        if mode == "compare" and not os.path.isfile(self.base_scan_path):
+            messagebox.showerror("Scan comparaison", "Aucun scan initial trouvé. Lancez d'abord un scan initial."); return
         raw_targets = self.entry_target.get().strip() or default_targets_string()
         targets = [t.strip().strip('"') for t in raw_targets.split(";") if t.strip()]
         principal = self.default_principal.strip() if self.default_principal else ""
@@ -173,7 +182,9 @@ class AccessChkGUI(tk.Tk):
         self.running=True
         self.current_target = None
         self.current_principal = None
-        self.btn_scan.configure(state=tk.DISABLED); self.btn_stop.configure(state=tk.NORMAL); self.pbar.start(60)
+        self.scan_mode = mode
+        self.btn_scan_base.configure(state=tk.DISABLED); self.btn_scan_compare.configure(state=tk.DISABLED)
+        self.btn_stop.configure(state=tk.NORMAL); self.pbar.start(60)
 
         threading.Thread(target=self._run_accesschk_thread, args=(accesschk, targets, principal), daemon=True).start()
 
@@ -187,7 +198,8 @@ class AccessChkGUI(tk.Tk):
         finally:
             self.running = False
             self.pbar.stop()
-            self.btn_scan.configure(state=tk.NORMAL)
+            self.scan_mode = None
+            self._update_compare_state()
             self.btn_stop.configure(state=tk.DISABLED)
             self.proc = None
             self.current_target = None
@@ -262,11 +274,9 @@ class AccessChkGUI(tk.Tk):
                 self.status_var.set(item["_status"])
                 continue
             if item.get("_finished"):
-                rc=item.get("returncode"); self.status_var.set(f"Terminé (rc={rc}). {len(self.logs)} lignes.")
-                self.proc=None; self.running=False; self.pbar.stop()
-                self.current_target = None
-                self.current_principal = None
-                self.btn_scan.configure(state=tk.NORMAL); self.btn_stop.configure(state=tk.DISABLED); continue
+                rc=item.get("returncode")
+                self._finish_scan(rc)
+                continue
             self.logs.append(item); self._line_count += 1
             text=item["line"]
             if item["err"]: buf_err.append(text)
@@ -286,6 +296,19 @@ class AccessChkGUI(tk.Tk):
             principal = self.current_principal or "(auto)"
             self.status_var.set(f"Scan en cours — {principal} @ {target} : {self._line_count} lignes")
         self.after(100, self._poll_queue)
+
+    def _finish_scan(self, returncode: int):
+        self.proc = None
+        self.running = False
+        self.pbar.stop()
+        self.current_target = None
+        self.current_principal = None
+        self.status_var.set(f"Terminé (rc={returncode}). {len(self.logs)} lignes.")
+        self.btn_stop.configure(state=tk.DISABLED)
+        try:
+            self._persist_scan_results()
+        finally:
+            self._update_compare_state()
 
     # ---- filtering / export ----
     def _is_dir_cached(self, path: str) -> bool:
@@ -342,6 +365,92 @@ class AccessChkGUI(tk.Tk):
             messagebox.showerror("Erreur export", str(ex))
 
     # ---- misc ----
+    def _persist_scan_results(self):
+        mode = self.scan_mode
+        self.scan_mode = None
+        if not mode:
+            return
+        lines = [it["line"] for it in self.logs]
+        target_path = self.base_scan_path if mode == "baseline" else self.compare_scan_path
+        try:
+            with open(target_path, "w", encoding="utf-8") as fh:
+                if lines:
+                    fh.write("\n".join(lines))
+                    fh.write("\n")
+                else:
+                    fh.truncate(0)
+        except Exception as ex:
+            messagebox.showerror("Enregistrement du scan", f"Impossible d'enregistrer le scan : {ex}")
+            return
+
+        if mode == "baseline":
+            self._safe_remove(self.compare_scan_path)
+            self._safe_remove(self.diff_output_path)
+            messagebox.showinfo("Scan initial", f"Scan initial enregistré dans : {target_path}")
+        else:
+            self._handle_compare_diff(lines)
+
+    def _handle_compare_diff(self, current_lines):
+        try:
+            with open(self.base_scan_path, "r", encoding="utf-8") as fh:
+                base_lines = fh.read().splitlines()
+        except FileNotFoundError:
+            messagebox.showerror("Scan comparaison", "Le scan initial est introuvable pour générer la comparaison.")
+            return
+        except Exception as ex:
+            messagebox.showerror("Scan comparaison", f"Impossible de lire le scan initial : {ex}")
+            return
+
+        new_lines = [ln.rstrip("\n") for ln in current_lines]
+        diff_lines = list(difflib.unified_diff(base_lines, new_lines,
+                                               fromfile=os.path.basename(self.base_scan_path),
+                                               tofile=os.path.basename(self.compare_scan_path),
+                                               lineterm=""))
+        if diff_lines:
+            diff_text = "\n".join(diff_lines)
+            try:
+                with open(self.diff_output_path, "w", encoding="utf-8") as fh:
+                    fh.write(diff_text)
+                    if not diff_text.endswith("\n"):
+                        fh.write("\n")
+            except Exception:
+                pass
+            self._show_diff_window(diff_text)
+        else:
+            self._safe_remove(self.diff_output_path)
+            messagebox.showinfo("Scan comparaison", "Aucune différence détectée entre les scans.")
+
+    def _show_diff_window(self, diff_text: str):
+        win = tk.Toplevel(self)
+        win.title("Différence entre les scans")
+        win.geometry("900x600")
+        txt = tk.Text(win, wrap=tk.NONE)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        txt.insert("1.0", diff_text)
+        txt.configure(state=tk.DISABLED)
+        yscroll = ttk.Scrollbar(win, orient=tk.VERTICAL, command=txt.yview)
+        yscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        txt.configure(yscrollcommand=yscroll.set)
+        xscroll = ttk.Scrollbar(win, orient=tk.HORIZONTAL, command=txt.xview)
+        xscroll.pack(side=tk.BOTTOM, fill=tk.X)
+        txt.configure(xscrollcommand=xscroll.set)
+
+    def _update_compare_state(self):
+        if self.running:
+            self.btn_scan_base.configure(state=tk.DISABLED)
+            self.btn_scan_compare.configure(state=tk.DISABLED)
+        else:
+            self.btn_scan_base.configure(state=tk.NORMAL)
+            state_compare = tk.NORMAL if os.path.isfile(self.base_scan_path) else tk.DISABLED
+            self.btn_scan_compare.configure(state=state_compare)
+
+    def _safe_remove(self, path: str):
+        try:
+            if path and os.path.isfile(path):
+                os.remove(path)
+        except Exception:
+            pass
+
     def _copy_selection(self):
         try: sel = self.txt.selection_get(); self.clipboard_clear(); self.clipboard_append(sel)
         except Exception: pass
@@ -358,7 +467,12 @@ class AccessChkGUI(tk.Tk):
         try:
             if self.proc and self.proc.poll() is None: self.proc.kill()
         except Exception: pass
+        self._cleanup_scan_files()
         self.destroy()
+
+    def _cleanup_scan_files(self):
+        for path in (self.base_scan_path, self.compare_scan_path, self.diff_output_path):
+            self._safe_remove(path)
 
 def main():
     app=AccessChkGUI(); app.protocol("WM_DELETE_WINDOW", app.on_close); app.mainloop()
