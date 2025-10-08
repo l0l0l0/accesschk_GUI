@@ -61,6 +61,15 @@ LINE_RW_PREFIX = re.compile(r"^\s*RW\s+", re.I)
 # Pour coloration rouge (garde l’ancienne heuristique au cas où)
 WRITE_REGEX = re.compile(r"(?:^|\s)(rw|w|write|write_data|file_write_data|file_write|:w|W:|WriteData|FILE_WRITE_DATA)\b", re.I)
 
+# Messages d'erreurs verbeux à ignorer (localisés)
+SUPPRESSED_ERROR_PATTERNS = (
+    re.compile(r"error getting security", re.I),
+    re.compile(
+        r"la syntaxe du nom de fichier, de r[ée]pertoire ou de volume est incorrecte",
+        re.I,
+    ),
+)
+
 # Extrait le premier chemin de type Windows/UNC
 PATH_EXTRACT = re.compile(r"(?:[A-Za-z]:\\|\\\\[^\\]+\\)[^\r\n]*")
 def extract_first_path(s: str):
@@ -371,7 +380,7 @@ class AccessChkGUI(tk.Tk):
                     item = dict(item)
                     item["line"] = text
                 self._pending_path = None
-            if "error getting security" in text.lower():
+            if any(p.search(text) for p in SUPPRESSED_ERROR_PATTERNS):
                 self._suppressed_errors += 1
                 self._suppress_error_sequence(buf_normal, buf_write, buf_err)
                 processed += 1
