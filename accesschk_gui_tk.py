@@ -113,6 +113,7 @@ class AccessChkGUI(tk.Tk):
         self.logs=[]; self.q=queue.Queue(); self.proc=None; self.running=False
         self.BATCH_MAX=250; self._line_count=0; self._write_count=0; self._isdir_cache={}
         self._suppressed_errors = 0
+        self._pending_path = None
         self.current_target = None
         self.current_principal = None
         self.default_principal = current_user_principal()
@@ -228,6 +229,7 @@ class AccessChkGUI(tk.Tk):
 
         self.logs.clear(); self._line_count=0; self._write_count=0; self._isdir_cache.clear()
         self._suppressed_errors = 0
+        self._pending_path = None
         self.txt.configure(state=tk.NORMAL); self.txt.delete("1.0", tk.END); self.txt.configure(state=tk.DISABLED)
         principal_label = principal or "(introuvable)"
         self.status_var.set(f"Préparation du scan : {principal_label} sur {len(targets)} cible(s). 0 lignes (0 RW)")
@@ -343,6 +345,32 @@ class AccessChkGUI(tk.Tk):
                 self._finish_scan(rc)
                 continue
             text=item["line"]
+            if not text.strip():
+                self._pending_path = None
+                processed += 1
+                continue
+            if not item["err"]:
+                path = extract_first_path(text)
+                if not item["write"]:
+                    if path and text.strip() == path.strip():
+                        self._pending_path = path.strip()
+                        processed += 1
+                        continue
+                    else:
+                        self._pending_path = None
+                else:
+                    if (not path) and self._pending_path:
+                        text = f"{text.strip()} — {self._pending_path}"
+                        item = dict(item)
+                        item["line"] = text
+                        path = extract_first_path(text)
+                    self._pending_path = None
+            else:
+                if self._pending_path and not extract_first_path(text):
+                    text = f"{self._pending_path} — {text.strip()}"
+                    item = dict(item)
+                    item["line"] = text
+                self._pending_path = None
             if "error getting security" in text.lower():
                 self._suppressed_errors += 1
                 self._suppress_error_sequence(buf_normal, buf_write, buf_err)
