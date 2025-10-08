@@ -37,10 +37,10 @@ class AppConfig:
     """Configuration centralisée de l'application."""
     
     # Performance
-    BATCH_SIZE = 50  # Réduit encore plus pour éviter les blocages
-    BATCH_TIMEOUT_MS = 25  # Timeout plus court pour plus de fluidité
-    UI_UPDATE_INTERVAL_MS = 50  # Très fréquent pour éviter les arrêts
-    MAX_DISPLAYED_LINES = 5000  # Limite réduite pour meilleures performances
+    BATCH_SIZE = 25  # Encore plus petit pour éviter les blocages
+    BATCH_TIMEOUT_MS = 15  # Timeout ultra-court
+    UI_UPDATE_INTERVAL_MS = 30  # Très fréquent
+    MAX_DISPLAYED_LINES = 2000  # Limite drastiquement réduite
     
     # UI
     WINDOW_WIDTH = 1100
@@ -712,6 +712,8 @@ class AccessChkGUI(tk.Tk):
         # État de l'application
         self.logs = []
         self.running = False
+        self.scan_mode = None
+        self._current_scan_file = None  # Fichier de scan en cours d'écriture
         
         # Métriques et cache
         self._line_count = 0
@@ -1213,6 +1215,19 @@ Développé avec Python et Tkinter
         self._isdir_cache.clear()
         self._suppressed_errors = 0
         self._pending_path = None
+        self.scan_mode = mode
+        
+        # Créer immédiatement le fichier de scan pour qu'il soit visible
+        target_path = self.base_scan_path if mode == "baseline" else self.compare_scan_path
+        try:
+            # Créer un fichier vide au début
+            with open(target_path, "w", encoding="utf-8") as fh:
+                fh.write(f"# Scan {mode} démarré à {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            self._current_scan_file = target_path
+            logger.info(f"Fichier de scan créé : {target_path}")
+        except Exception as ex:
+            logger.warning(f"Impossible de créer le fichier de scan : {ex}")
+            self._current_scan_file = None
         
         # Mise à jour de l'UI
         self.txt.configure(state=tk.NORMAL)
@@ -1280,6 +1295,10 @@ Développé avec Python et Tkinter
             if iteration_count % 10 == 0:
                 self.update_idletasks()
             
+            # Pause plus longue tous les 100 éléments pour éviter les blocages complets
+            if iteration_count % 100 == 0:
+                self.after_idle(lambda: None)  # Force le traitement des événements en attente
+            
             if "_status" in item:
                 self.status_var.set(item["_status"])
                 continue
@@ -1343,24 +1362,44 @@ Développé avec Python et Tkinter
                 processed += 1
                 continue
             
-            # Limitation du nombre de lignes pour éviter les ralentissements
+            # Limitation drastique du nombre de lignes pour éviter les ralentissements
             if len(self.logs) >= self.app_config.MAX_DISPLAYED_LINES:
-                # Supprime les anciennes lignes (FIFO)
-                removed_items = self.logs[:self.app_config.BATCH_SIZE]
-                self.logs = self.logs[self.app_config.BATCH_SIZE:]
+                # Au lieu de supprimer ligne par ligne, on repart avec une liste plus petite
+                # Garde seulement les dernières lignes importantes (RW) + un échantillon
+                important_lines = [item for item in self.logs[-500:] if item["write"] and not item["err"]]
+                sample_lines = self.logs[-200:]  # Garde les 200 dernières lignes pour contexte
+                
+                # Combine les lignes importantes avec l'échantillon
+                self.logs = important_lines + sample_lines
                 self._line_count = len(self.logs)
                 self._write_count = sum(1 for item in self.logs if item["write"] and not item["err"])
                 
-                # Met à jour l'affichage
+                # Reconstruit l'affichage entièrement (plus rapide que supprimer ligne par ligne)
                 self.txt.configure(state=tk.NORMAL)
-                self.txt.delete("1.0", f"{self.app_config.BATCH_SIZE}.0")
+                self.txt.delete("1.0", tk.END)
+                
+                # Redessine seulement les lignes conservées
+                for item in self.logs:
+                    color = "red" if item["err"] else ("green" if item["write"] else "black")
+                    self.txt.insert(tk.END, item["line"] + "\n", color)
+                
                 self.txt.configure(state=tk.DISABLED)
+                self.txt.see(tk.END)
             
             # Ajout de la ligne
             self.logs.append(item)
             self._line_count += 1
             if item["write"] and not item["err"]:
                 self._write_count += 1
+            
+            # Écriture en temps réel dans le fichier de scan
+            if self._current_scan_file:
+                try:
+                    with open(self._current_scan_file, "a", encoding="utf-8") as fh:
+                        fh.write(text + "\n")
+                        fh.flush()  # Force l'écriture immédiate
+                except Exception:
+                    pass  # Ignore les erreurs d'écriture pour ne pas ralentir le scan
             
             # Buffering pour l'affichage
             if item["err"]: 
