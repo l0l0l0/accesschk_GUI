@@ -623,16 +623,24 @@ class AccessChkGUI(tk.Tk):
         new_lines = [ln.rstrip("\n") for ln in current_lines]
         base_filtered = self._filter_lines_for_diff(base_lines)
         new_filtered = self._filter_lines_for_diff(new_lines)
-        diff_lines = [
-            line for line in difflib.unified_diff(
-                base_filtered,
-                new_filtered,
-                fromfile="",
-                tofile="",
-                lineterm="",
-            )
-            if line and not line.startswith("---") and not line.startswith("+++")
-        ]
+        raw_diff = difflib.unified_diff(
+            base_filtered,
+            new_filtered,
+            fromfile="",
+            tofile="",
+            lineterm="",
+        )
+        diff_lines = []
+        for line in raw_diff:
+            if not line or line.startswith("+++") or line.startswith("---"):
+                continue
+            if not line.startswith("+"):
+                continue
+            candidate = line[1:].lstrip()
+            if not LINE_RW_PREFIX.search(candidate):
+                continue
+            diff_lines.append(candidate)
+
         if diff_lines:
             diff_text = "\n".join(diff_lines)
             try:
