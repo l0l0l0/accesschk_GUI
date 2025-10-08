@@ -1231,14 +1231,19 @@ Développé avec Python et Tkinter
             lower = line.lower()
             if "[erreur]" in lower or "[info]" in lower or "[exception]" in lower:
                 continue
-            if not LINE_RW_PREFIX.search(line):
-                continue
+            
+            # Deux cas à traiter :
+            # 1. Lignes de répertoires (commencent par un chemin)
+            # 2. Lignes de permissions RW (indentées, commencent par RW)
+            
             path = extract_first_path(line)
-            if not path:
-                continue
-            if not self._is_dir_cached(path):
-                continue
-            filtered.append(line)
+            if path:
+                # Ligne de répertoire - la garder si c'est effectivement un répertoire
+                if self._is_dir_cached(path):
+                    filtered.append(line)
+            elif LINE_RW_PREFIX.search(line):
+                # Ligne de permission RW sans chemin - la garder pour la comparaison
+                filtered.append(line)
         return filtered
 
     def _export_filtered(self) -> None:
