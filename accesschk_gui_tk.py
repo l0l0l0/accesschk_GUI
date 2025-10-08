@@ -5,6 +5,7 @@ import os, sys, threading, queue, subprocess, re, ctypes, getpass, difflib, tkin
 from tkinter import ttk, filedialog, messagebox
 
 EXPORT_DEFAULT = "accesschk_filtered_logs.txt"
+DIFF_EXPORT_DEFAULT = "accesschk_diff.txt"
 
 
 def is_running_elevated() -> bool:
@@ -71,7 +72,7 @@ class AccessChkGUI(tk.Tk):
         self.title("AccessChk GUI v1.10")
         self.geometry("1100x800"); self.minsize(880, 620)
         self.logs=[]; self.q=queue.Queue(); self.proc=None; self.running=False
-        self.BATCH_MAX=250; self._line_count=0; self._isdir_cache={}
+        self.BATCH_MAX=250; self._line_count=0; self._write_count=0; self._isdir_cache={}
         self.current_target = None
         self.current_principal = None
         self.default_principal = current_user_principal()
@@ -175,10 +176,10 @@ class AccessChkGUI(tk.Tk):
         targets = [t.strip().strip('"') for t in raw_targets.split(";") if t.strip()]
         principal = self.default_principal.strip() if self.default_principal else ""
 
-        self.logs.clear(); self._line_count=0; self._isdir_cache.clear()
+        self.logs.clear(); self._line_count=0; self._write_count=0; self._isdir_cache.clear()
         self.txt.configure(state=tk.NORMAL); self.txt.delete("1.0", tk.END); self.txt.configure(state=tk.DISABLED)
         principal_label = principal or "(introuvable)"
-        self.status_var.set(f"Préparation du scan : {principal_label} sur {len(targets)} cible(s). 0 lignes")
+        self.status_var.set(f"Préparation du scan : {principal_label} sur {len(targets)} cible(s). 0 lignes (0 RW)")
         self.running=True
         self.current_target = None
         self.current_principal = None
@@ -192,7 +193,7 @@ class AccessChkGUI(tk.Tk):
         try:
             if self.proc and self.proc.poll() is None:
                 self.proc.kill()
-                self.status_var.set(f"Arrêt manuel. {self._line_count} lignes.")
+                self.status_var.set(f"Arrêt manuel. {self._line_count} lignes ({self._write_count} RW).")
         except Exception:
             pass
         finally:
@@ -278,6 +279,8 @@ class AccessChkGUI(tk.Tk):
                 self._finish_scan(rc)
                 continue
             self.logs.append(item); self._line_count += 1
+            if item["write"] and not item["err"]:
+                self._write_count += 1
             text=item["line"]
             if item["err"]: buf_err.append(text)
             elif item["write"]: buf_write.append(text)
@@ -294,7 +297,9 @@ class AccessChkGUI(tk.Tk):
         if self.running:
             target = self.current_target or "(en attente)"
             principal = self.current_principal or "(auto)"
-            self.status_var.set(f"Scan en cours — {principal} @ {target} : {self._line_count} lignes")
+            self.status_var.set(
+                f"Scan en cours — {principal} @ {target} : {self._line_count} lignes ({self._write_count} RW)"
+            )
         self.after(100, self._poll_queue)
 
     def _finish_scan(self, returncode: int):
@@ -303,7 +308,9 @@ class AccessChkGUI(tk.Tk):
         self.pbar.stop()
         self.current_target = None
         self.current_principal = None
-        self.status_var.set(f"Terminé (rc={returncode}). {len(self.logs)} lignes.")
+        self.status_var.set(
+            f"Terminé (rc={returncode}). {len(self.logs)} lignes ({self._write_count} RW)."
+        )
         self.btn_stop.configure(state=tk.DISABLED)
         try:
             self._persist_scan_results()
@@ -351,6 +358,24 @@ class AccessChkGUI(tk.Tk):
                 if not p or not self._is_dir_cached(p):
                     continue
             yield it
+
+    def _filter_lines_for_diff(self, lines):
+        filtered = []
+        for line in lines:
+            if not line:
+                continue
+            lower = line.lower()
+            if "[erreur]" in lower or "[info]" in lower or "[exception]" in lower:
+                continue
+            if not LINE_RW_PREFIX.search(line):
+                continue
+            path = extract_first_path(line)
+            if not path:
+                continue
+            if not self._is_dir_cached(path):
+                continue
+            filtered.append(line)
+        return filtered
 
     def _export_filtered(self):
         if not self.logs: messagebox.showinfo("Export", "Aucun log à exporter."); return
@@ -402,10 +427,18 @@ class AccessChkGUI(tk.Tk):
             return
 
         new_lines = [ln.rstrip("\n") for ln in current_lines]
-        diff_lines = list(difflib.unified_diff(base_lines, new_lines,
-                                               fromfile=os.path.basename(self.base_scan_path),
-                                               tofile=os.path.basename(self.compare_scan_path),
-                                               lineterm=""))
+        base_filtered = self._filter_lines_for_diff(base_lines)
+        new_filtered = self._filter_lines_for_diff(new_lines)
+        diff_lines = [
+            line for line in difflib.unified_diff(
+                base_filtered,
+                new_filtered,
+                fromfile="",
+                tofile="",
+                lineterm="",
+            )
+            if line and not line.startswith("---") and not line.startswith("+++")
+        ]
         if diff_lines:
             diff_text = "\n".join(diff_lines)
             try:
@@ -415,18 +448,43 @@ class AccessChkGUI(tk.Tk):
                         fh.write("\n")
             except Exception:
                 pass
-            self._show_diff_window(diff_text)
+            self._show_diff_window(diff_lines)
         else:
             self._safe_remove(self.diff_output_path)
-            messagebox.showinfo("Scan comparaison", "Aucune différence détectée entre les scans.")
+            messagebox.showinfo("Scan comparaison", "Aucune différence RW détectée entre les scans.")
 
-    def _show_diff_window(self, diff_text: str):
+    def _show_diff_window(self, diff_lines):
         win = tk.Toplevel(self)
         win.title("Différence entre les scans")
         win.geometry("900x600")
+        txt_content = "\n".join(diff_lines)
+        if txt_content and not txt_content.endswith("\n"):
+            txt_content += "\n"
+
+        frm_actions = ttk.Frame(win)
+        frm_actions.pack(side=tk.TOP, fill=tk.X, padx=8, pady=6)
+
+        def _export_diff():
+            path = filedialog.asksaveasfilename(
+                title="Exporter la comparaison",
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+                initialfile=DIFF_EXPORT_DEFAULT,
+            )
+            if not path:
+                return
+            try:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(txt_content)
+                messagebox.showinfo("Export diff", f"Export terminé : {path}")
+            except Exception as ex:
+                messagebox.showerror("Export diff", str(ex))
+
+        ttk.Button(frm_actions, text="Exporter", command=_export_diff).pack(side=tk.RIGHT)
+
         txt = tk.Text(win, wrap=tk.NONE)
         txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        txt.insert("1.0", diff_text)
+        txt.insert("1.0", txt_content)
         txt.configure(state=tk.DISABLED)
         yscroll = ttk.Scrollbar(win, orient=tk.VERTICAL, command=txt.yview)
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
