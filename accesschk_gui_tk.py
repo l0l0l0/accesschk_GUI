@@ -1239,6 +1239,23 @@ Développé avec Python et Tkinter
                     item["line"] = text
                 self._pending_path = None
             
+            # Vérification des exclusions - filtrer les lignes contenant des chemins exclus
+            if self.exclusions:
+                line_text = text.lower()
+                should_exclude = False
+                for exclusion_path in self.exclusions:
+                    if exclusion_path.strip():
+                        # Normaliser le chemin d'exclusion
+                        normalized_exclusion = os.path.normpath(exclusion_path.strip()).lower()
+                        # Vérifier si le chemin exclu est présent dans la ligne
+                        if normalized_exclusion in line_text or line_text.startswith(normalized_exclusion.lower()):
+                            should_exclude = True
+                            break
+                
+                if should_exclude:
+                    processed += 1
+                    continue
+            
             # Gestion des erreurs supprimées
             if matches_suppressed_error(text):
                 self._suppressed_errors += 1
