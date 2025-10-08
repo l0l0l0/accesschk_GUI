@@ -1815,16 +1815,21 @@ Développé avec Python et Tkinter
                 clean_line = line[1:].strip()
                 removed_rw_lines.append(clean_line)
         
-        # Deuxième passe : garder seulement les vrais nouveaux droits
+        # Deuxième passe : garder seulement les vrais nouveaux droits (+RW)
         for original_line, clean_added in added_rw_lines:
             # Vérifier si cette ligne ajoutée n'était pas déjà présente (pas de ligne - correspondante)
             if clean_added not in removed_rw_lines:
                 filtered_diff_lines.append(original_line)
         
-        # Ajouter les chemins de répertoires pour le contexte
+        # Ajouter les chemins de répertoires pour le contexte MAIS pas les lignes RW existantes
         for line in diff_lines:
-            if not line.startswith(("+", "-")) and extract_first_path(line):
-                filtered_diff_lines.append(line)
+            if not line.startswith(("+", "-")):
+                # Exclure les lignes qui montrent les anciens droits RW (sans + ou -)
+                if "RW" in line:
+                    continue  # Ne pas afficher les anciens droits RW
+                # Garder seulement les chemins de répertoires pour contexte
+                if extract_first_path(line):
+                    filtered_diff_lines.append(line)
         
         diff_lines = filtered_diff_lines
         if diff_lines:
