@@ -481,9 +481,9 @@ class AccessChkGUI(tk.Tk):
         self.minsize(AppConfig.MIN_WIDTH, AppConfig.MIN_HEIGHT)
         
         # Configuration et composants
-        self.config = AppConfig()
+        self.app_config = AppConfig()
         self.q = queue.Queue()
-        self.runner = AccessChkRunner(self.config, self.q)
+        self.runner = AccessChkRunner(self.app_config, self.q)
         
         # État de l'application
         self.logs = []
@@ -520,7 +520,7 @@ class AccessChkGUI(tk.Tk):
         
         self._build_ui()
         self.after(0, self._enforce_standard_user)
-        self.after(self.config.UI_UPDATE_INTERVAL_MS, self._poll_queue)
+        self.after(self.app_config.UI_UPDATE_INTERVAL_MS, self._poll_queue)
 
     def _build_ui(self) -> None:
         """Construit tous les widgets de la fenêtre principale."""
@@ -655,7 +655,7 @@ class AccessChkGUI(tk.Tk):
         self.btn_scan_base.configure(state=tk.DISABLED)
         self.btn_scan_compare.configure(state=tk.DISABLED)
         self.btn_stop.configure(state=tk.NORMAL)
-        self.pbar.start(self.config.PROGRESS_BAR_SPEED)
+        self.pbar.start(self.app_config.PROGRESS_BAR_SPEED)
 
         # Lancement du scan via le runner
         try:
@@ -687,7 +687,7 @@ class AccessChkGUI(tk.Tk):
         buf_normal, buf_write, buf_err = [], [], []
         
         # Traitement par batch avec limite de temps
-        while processed < self.config.BATCH_SIZE and (time.time() - start_time) < (self.config.BATCH_TIMEOUT_MS / 1000):
+        while processed < self.app_config.BATCH_SIZE and (time.time() - start_time) < (self.app_config.BATCH_TIMEOUT_MS / 1000):
             try: 
                 item = self.q.get_nowait()
             except queue.Empty: 
@@ -740,16 +740,16 @@ class AccessChkGUI(tk.Tk):
                 continue
             
             # Limitation du nombre de lignes pour éviter les ralentissements
-            if len(self.logs) >= self.config.MAX_DISPLAYED_LINES:
+            if len(self.logs) >= self.app_config.MAX_DISPLAYED_LINES:
                 # Supprime les anciennes lignes (FIFO)
-                removed_items = self.logs[:self.config.BATCH_SIZE]
-                self.logs = self.logs[self.config.BATCH_SIZE:]
+                removed_items = self.logs[:self.app_config.BATCH_SIZE]
+                self.logs = self.logs[self.app_config.BATCH_SIZE:]
                 self._line_count = len(self.logs)
                 self._write_count = sum(1 for item in self.logs if item["write"] and not item["err"])
                 
                 # Met à jour l'affichage
                 self.txt.configure(state=tk.NORMAL)
-                self.txt.delete("1.0", f"{self.config.BATCH_SIZE}.0")
+                self.txt.delete("1.0", f"{self.app_config.BATCH_SIZE}.0")
                 self.txt.configure(state=tk.DISABLED)
             
             # Ajout de la ligne
@@ -782,7 +782,7 @@ class AccessChkGUI(tk.Tk):
             )
         
         # Planifier la prochaine vérification
-        self.after(self.config.UI_UPDATE_INTERVAL_MS, self._poll_queue)
+        self.after(self.app_config.UI_UPDATE_INTERVAL_MS, self._poll_queue)
     
     def _update_display_batch(self, buf_normal: List[str], buf_write: List[str], buf_err: List[str]):
         """Met à jour l'affichage par batch pour de meilleures performances."""
