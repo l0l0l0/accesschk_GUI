@@ -1692,15 +1692,32 @@ Développé avec Python et Tkinter
             if line and not line.startswith("---") and not line.startswith("+++") and not line.startswith("@@")
         ]
         
-        # Filtrer les lignes pour ne garder que les nouveaux droits RW (lignes commençant par +)
-        # et exclure les lignes qui montrent la suppression d'anciens droits RW (lignes commençant par -)
+        # Filtrer les lignes pour ne garder que les VRAIMENT nouveaux droits RW
+        # c'est-à-dire les lignes +RW qui n'ont pas de ligne -RW correspondante
         filtered_diff_lines = []
+        added_rw_lines = []
+        removed_rw_lines = []
+        
+        # Première passe : collecter les ajouts et suppressions
         for line in diff_lines:
-            # Garder seulement les ajouts de nouveaux droits RW
             if line.startswith("+") and "RW" in line:
-                filtered_diff_lines.append(line)
-            # Garder aussi les chemins de répertoires (sans + ou -)
-            elif not line.startswith(("+", "-")) and extract_first_path(line):
+                # Nettoyer la ligne pour la comparaison (enlever le +)
+                clean_line = line[1:].strip()
+                added_rw_lines.append((line, clean_line))
+            elif line.startswith("-") and "RW" in line:
+                # Nettoyer la ligne pour la comparaison (enlever le -)
+                clean_line = line[1:].strip()
+                removed_rw_lines.append(clean_line)
+        
+        # Deuxième passe : garder seulement les vrais nouveaux droits
+        for original_line, clean_added in added_rw_lines:
+            # Vérifier si cette ligne ajoutée n'était pas déjà présente (pas de ligne - correspondante)
+            if clean_added not in removed_rw_lines:
+                filtered_diff_lines.append(original_line)
+        
+        # Ajouter les chemins de répertoires pour le contexte
+        for line in diff_lines:
+            if not line.startswith(("+", "-")) and extract_first_path(line):
                 filtered_diff_lines.append(line)
         
         diff_lines = filtered_diff_lines
