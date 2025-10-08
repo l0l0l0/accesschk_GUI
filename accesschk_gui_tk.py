@@ -17,6 +17,7 @@ import queue
 import subprocess
 import re
 import ctypes
+import unicodedata
 import getpass
 import difflib
 import tkinter as tk
@@ -69,6 +70,31 @@ SUPPRESSED_ERROR_PATTERNS = (
         re.I,
     ),
 )
+
+SUPPRESSED_ERROR_FOLDED_SNIPPETS = (
+    "error getting security",
+    "la syntaxe du nom de fichier, de repertoire ou de volume est incorrecte",
+)
+
+
+def _normalize_for_error_matching(text: str) -> str:
+    """Return a lower-cased ASCII approximation of ``text`` for robust matching."""
+
+    try:
+        normalized = unicodedata.normalize("NFKD", text)
+    except Exception:
+        normalized = text
+    stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return stripped.casefold()
+
+
+def matches_suppressed_error(text: str) -> bool:
+    """True when ``text`` corresponds to a known noisy AccessChk error message."""
+
+    if any(p.search(text) for p in SUPPRESSED_ERROR_PATTERNS):
+        return True
+    folded = _normalize_for_error_matching(text)
+    return any(snippet in folded for snippet in SUPPRESSED_ERROR_FOLDED_SNIPPETS)
 
 # Extrait le premier chemin de type Windows/UNC
 PATH_EXTRACT = re.compile(r"(?:[A-Za-z]:\\|\\\\[^\\]+\\)[^\r\n]*")
@@ -380,7 +406,7 @@ class AccessChkGUI(tk.Tk):
                     item = dict(item)
                     item["line"] = text
                 self._pending_path = None
-            if any(p.search(text) for p in SUPPRESSED_ERROR_PATTERNS):
+            if matches_suppressed_error(text):
                 self._suppressed_errors += 1
                 self._suppress_error_sequence(buf_normal, buf_write, buf_err)
                 processed += 1
